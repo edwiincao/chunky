@@ -4,6 +4,7 @@
 #define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include <algorithm>
+#include <cassert>
 #include <ctime>
 #include <deque>
 #include <functional>
@@ -224,6 +225,37 @@ namespace chunky {
             });
       }
 
+      template<typename MutableBufferSequence>
+      size_t read_some(MutableBufferSequence&& buffers) {
+         // Take data from the streambuf first.
+         auto nBytes = std::min(requestBytes_, boost::asio::buffer_size(buffers));
+         if (streambuf_.size()) {
+            nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
+            streambuf_.consume(nBytes);
+         }
+         else
+            nBytes = boost::asio::read(*stream_, buffers, boost::asio::transfer_exactly(nBytes));
+         
+         requestBytes_ -= nBytes;
+         if (requestChunksPending_ && !requestBytes_) {
+            get_line();
+            read_chunk_header();
+         }
+
+         return nBytes;
+      }
+      
+      template<typename MutableBufferSequence>
+      size_t read_some(MutableBufferSequence&& buffers, boost::system::error_code& error) {
+         try {
+            return read_some(buffers);
+         }
+         catch (const boost::system::system_error& e) {
+            error = e.code();
+            return 0;
+         }
+      }
+      
       template<typename ConstBufferSequence>
       size_t write_some(ConstBufferSequence&& buffers, boost::system::error_code& error) {
          std::string prefix;
@@ -263,13 +295,19 @@ namespace chunky {
       }
 
       void finish(boost::system::error_code& error) {
-         // while (requestBytes_) {
-         //    const auto n = std::min(requestBytes_, decltype(requestBytes_)(65536));
-         //    std::vector<char> b(n);
-         //    boost::asio::read(*this, boost::asio::buffer(b), error);
-         //    if (error)
-         //       return;
-         // }
+         while (requestBytes_) {
+            const auto n = std::min(requestBytes_, decltype(requestBytes_)(65536));
+            std::vector<char> b(n);
+            boost::asio::read(*this, boost::asio::buffer(b), error);
+            if (error)
+               return;
+         }
+
+         // Replace any unused bytes read by get_line().
+         if (auto unused = streambuf_.size()) {
+            stream_->put_back(streambuf_.data());
+            streambuf_.consume(unused);
+         }
 
          if (!responseChunked_ && !responseBytes_)
             response_headers()["Content-Length"] = "0";
@@ -367,6 +405,7 @@ namespace chunky {
 
          auto i = boost::asio::buffers_begin(streambuf_.data());
          std::string s(i, i + nBytes - crlf().size());
+         std::cout << ">>(" << s << ")\n";
          streambuf_.consume(nBytes);
          return s;
       }
@@ -456,7 +495,7 @@ namespace chunky {
                requestChunksPending_ = true;
                read_chunk_header(handler);
             }
-            else
+            else if (handler)
                handler(boost::system::error_code());
          }
          catch (...) {
@@ -470,12 +509,20 @@ namespace chunky {
       }
       
       void read_chunk_header(const Handler& handler = Handler()) {
+         assert(requestBytes_ == 0);
+         assert(requestChunksPending_);
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
                   try {
-                     if (!error)
+                     if (!error) {
                         process_chunk_header(s);
-                     handler(error);
+                        if (!requestChunksPending_)
+                           read_request_headers(handler);
+                        else
+                           handler(error);
+                     }
+                     else
+                        handler(error);
                   }
                   catch (...) {
                      // std::stoul() threw on the chunk header.
@@ -486,7 +533,8 @@ namespace chunky {
          else {
             const std::string s = get_line();
             process_chunk_header(s);
-            handler(boost::system::error_code());
+            if (!requestChunksPending_)
+               read_request_headers();
          }
       }
 

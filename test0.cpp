@@ -24,6 +24,8 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
 
          boost::asio::write(*http, boost::asio::buffer(std::string("how now brown cow")));
          http->finish();
+
+         create_http(tcp);
       });
 }
 
