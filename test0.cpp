@@ -23,9 +23,11 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
          http->response_headers()["Content-Type"] = "text/plain";
 
          boost::asio::write(*http, boost::asio::buffer(std::string("how now brown cow")));
-         http->finish();
-
-         create_http(tcp);
+         http->async_finish([=](const boost::system::error_code& error) {
+               create_http(http->stream());
+            });
+         // http->finish();
+         // create_http(http->stream());
       });
 }
 
