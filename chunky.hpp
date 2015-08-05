@@ -1,6 +1,8 @@
 #ifndef CHUNKY_HPP
 #define CHUNKY_HPP
 
+#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
+
 #include <algorithm>
 #include <deque>
 #include <memory>
@@ -75,14 +77,10 @@ namespace chunky {
          const MutableBufferSequence& buffers,
          ReadHandler&& handler) {
          if (!readBuffer_.empty()) {
-            const auto nBytes = std::min(readBuffer_.size(), boost::asio::buffer_size(buffers));
-            const auto iBegin = readBuffer_.begin();
-            const auto iEnd = iBegin + nBytes;
-            std::copy(iBegin, iEnd, boost::asio::buffers_begin(buffers));
-            readBuffer_.erase(iBegin, iEnd);
-
+            boost::system::error_code error;
+            const auto nBytes = read_some(buffers, error);
             strand_.post([=]() mutable {
-                  handler(boost::system::error_code(), nBytes);
+                  handler(error, nBytes);
                });
          }
          else {
@@ -103,6 +101,49 @@ namespace chunky {
             });
       }
 
+      template<typename MutableBufferSequence>
+      size_t read_some(
+         const MutableBufferSequence& buffers,
+         boost::system::error_code& error) {
+         if (!readBuffer_.empty()) {
+            const auto nBytes = std::min(readBuffer_.size(), boost::asio::buffer_size(buffers));
+            const auto iBegin = readBuffer_.begin();
+            const auto iEnd = iBegin + nBytes;
+            std::copy(iBegin, iEnd, boost::asio::buffers_begin(buffers));
+            readBuffer_.erase(iBegin, iEnd);
+            return nBytes;
+         }
+         else
+            return stream_.read_some(buffers, error);
+      }
+      
+      template<typename MutableBufferSequence>
+      size_t read_some(
+         const MutableBufferSequence& buffers) {
+         boost::system::error_code error;
+         const auto nBytes = read_some(buffers, error);
+         if (error)
+            throw boost::system::system_error(error);
+         return nBytes;
+      }
+
+      template<typename ConstBufferSequence>
+      size_t write_some(
+         const ConstBufferSequence& buffers,
+         boost::system::error_code& error) {
+         return stream_.write_some(buffers, error);
+      }
+
+      template<typename ConstBufferSequence>
+      size_t write_some(
+         const ConstBufferSequence& buffers) {
+         boost::system::error_code error;
+         const auto nBytes = write_some(buffers, error);
+         if (error)
+            throw boost::system::system_error(error);
+         return nBytes;
+      }
+      
       template<typename ConstBufferSequence>
       void put_back(const ConstBufferSequence& buffers) {
          readBuffer_.insert(0, boost::asio::buffers_begin(buffers), boost::asio::buffers_end(buffers));
@@ -154,13 +195,13 @@ namespace chunky {
          const std::shared_ptr<T>& stream,
          CreateHandler handler) {
          std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
-         http->read_request_line([=](const boost::system::error_code& error) {
+         http->async_read_request_line([=](const boost::system::error_code& error) {
                if (error) {
                   handler(error, http);
                   return;
                }
 
-               http->read_request_headers([=](const boost::system::error_code& error) {
+               http->async_read_request_headers([=](const boost::system::error_code& error) {
                      if (error) {
                         handler(error, http);
                         return;
@@ -213,9 +254,9 @@ namespace chunky {
          , responseBytes_(0)
          , responseChunked_(false) {
       }
-           
+      
       template<typename Handler>
-      void get_line(Handler&& handler) {
+      void async_get_line(Handler&& handler) {
          static const std::string delimiter("\r\n");
          boost::asio::async_read_until(
             *stream_, streambuf_, delimiter,
@@ -224,6 +265,7 @@ namespace chunky {
                   auto i = boost::asio::buffers_begin(streambuf_.data());
                   std::string s(i, i + nBytes - delimiter.size());
                   streambuf_.consume(nBytes);
+                  std::cout << ">>(" << s << ")\n";
                   handler(error, std::move(s));
                }
                else
@@ -231,54 +273,85 @@ namespace chunky {
             });
       }
 
+      std::string get_line() {
+         static const std::string delimiter("\r\n");
+         auto nBytes = boost::asio::read_until(
+            *stream_, streambuf_, delimiter);
+
+         auto i = boost::asio::buffers_begin(streambuf_.data());
+         std::string s(i, i + nBytes - delimiter.size());
+         streambuf_.consume(nBytes);
+         return s;
+      }
+      
       template<typename Handler>
-      void read_request_line(const Handler& handler) {
-         get_line([this, handler](boost::system::error_code error, std::string&& s) {
-               std::smatch requestMatch;
-               static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
-               if (std::regex_match(s, requestMatch, requestRegex)) {
-                  requestMethod_   = requestMatch[1];
-                  requestResource_ = requestMatch[2];
-                  requestVersion_  = requestMatch[3];
-
-                  if (requestVersion_ != "HTTP/1.1")
-                     error = make_error_code(unsupported_http_version);
-               }
-               else
-                  error = make_error_code(invalid_request_line);
-
+      void async_read_request_line(const Handler& handler) {
+         async_get_line([this, handler](boost::system::error_code error, std::string&& s) {
+               if (!error)
+                  error = process_request_line(s);
                handler(error);
             });
       }
 
+      void read_request_line() {
+         const std::string s = get_line();
+         if (boost::system::error_code error = process_request_line(s))
+            throw boost::system::system_error(error);
+      }
+
+      boost::system::error_code process_request_line(const std::string& s) {
+         std::smatch requestMatch;
+         static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
+         if (std::regex_match(s, requestMatch, requestRegex)) {
+            requestMethod_   = requestMatch[1];
+            requestResource_ = requestMatch[2];
+            requestVersion_  = requestMatch[3];
+
+            if (requestVersion_ != "HTTP/1.1")
+               return make_error_code(unsupported_http_version);
+         }
+         else
+            return make_error_code(invalid_request_line);
+
+         return boost::system::error_code();
+      }
+      
       template<typename Handler>
-      void read_request_headers(const Handler& handler) {
-         get_line([this, handler](const boost::system::error_code& error, std::string&& s) {
-               if (!s.empty()) {
-                  const auto colon = s.find_first_of(':');
-                  if (colon == std::string::npos) {
-                     handler(make_error_code(invalid_request_header));
-                     return;
-                  }
-
-                  std::string key = s.substr(0, colon);
-                  std::string value = s.substr(colon + 1);
-                  boost::algorithm::trim_left(value);
-
-                  // Coalesce values with the same key.
-                  const auto i = requestHeaders_.find(key);
-                  if (i != requestHeaders_.end()) {
-                     i->second += ", ";
-                     i->second += value;
-                  }
-                  else
-                     requestHeaders_.insert({{std::move(key), std::move(value)}});
-                     
-                  read_request_headers(handler);
-               }
+      void async_read_request_headers(const Handler& handler) {
+         async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
+               if (!s.empty() && !(error = process_request_header(s)))
+                  async_read_request_headers(handler);
                else
                   handler(error);
             });
+      }
+
+      void read_request_headers() {
+         for (auto s = get_line(); !s.empty(); s = get_line()) {
+            if (auto error = process_request_header(s))
+               throw boost::system::system_error(error);
+         }
+      }
+      
+      boost::system::error_code process_request_header(const std::string& s) {
+         const auto colon = s.find_first_of(':');
+         if (colon == std::string::npos)
+            return make_error_code(invalid_request_header);
+
+         std::string key = s.substr(0, colon);
+         std::string value = s.substr(colon + 1);
+         boost::algorithm::trim_left(value);
+
+         // Coalesce values with the same key.
+         const auto i = requestHeaders_.find(key);
+         if (i != requestHeaders_.end()) {
+            i->second += ", ";
+            i->second += value;
+         }
+         else
+            requestHeaders_.insert({{std::move(key), std::move(value)}});
+
+         return boost::system::error_code();
       }
    };
 
