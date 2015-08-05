@@ -18,6 +18,12 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
                    << '\n';
          for (const auto& header : http->request_headers())
             std::cout << header.first << ": " << header.second << '\n';
+
+         http->response_status() = 200;
+         http->response_headers()["Content-Type"] = "text/plain";
+
+         boost::asio::write(*http, boost::asio::buffer(std::string("how now brown cow")));
+         http->finish();
       });
 }
 

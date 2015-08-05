@@ -4,6 +4,7 @@
 #define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include <algorithm>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -13,6 +14,9 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
+#include <boost/format.hpp>
+#include <boost/iostreams/device/back_inserter.hpp>
+#include <boost/iostreams/filtering_stream.hpp>
 #include <boost/utility.hpp>
 
 namespace chunky {
@@ -47,6 +51,8 @@ namespace chunky {
                return "Invalid request header";
             case unsupported_http_version:
                return "Unsupported HTTP version";
+            case invalid_length:
+               return "Invalid length";
             default:
                return "chunky error";
             }
@@ -197,7 +203,7 @@ namespace chunky {
       template<typename CreateHandler>
       static void async_create(
          const std::shared_ptr<T>& stream,
-         CreateHandler handler) {
+         CreateHandler&& handler) {
          std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
          http->read_request_line([=](const boost::system::error_code& error) {
                if (error) {
@@ -218,6 +224,83 @@ namespace chunky {
             });
       }
 
+      template<typename ConstBufferSequence>
+      size_t write_some(ConstBufferSequence&& buffers, boost::system::error_code& error) {
+         std::string prefix;
+         std::string suffix;
+         auto nBytes = boost::asio::buffer_size(buffers);
+         prepare_write(nBytes, prefix, suffix);
+
+         if (!prefix.empty()) {
+            boost::asio::write(*stream(), boost::asio::buffer(prefix), error);
+               if (error)
+                  return 0;
+         }
+         
+         if (nBytes) {
+            nBytes = boost::asio::write(*stream(), buffers, error);
+            if (error)
+               return nBytes;
+         }
+         
+         if (!suffix.empty()) {
+            boost::asio::write(*stream(), boost::asio::buffer(suffix), error);
+               if (error)
+                  return 0;
+         }
+
+         responseBytes_ += nBytes;
+         return nBytes;
+      }
+      
+      template<typename ConstBufferSequence>
+      size_t write_some(ConstBufferSequence&& buffers) {
+         boost::system::error_code error;
+         size_t nBytes = write_some(buffers, error);
+         if (error)
+            throw boost::system::system_error(error);
+         return nBytes;
+      }
+
+      void finish(boost::system::error_code& error) {
+         // while (requestBytes_) {
+         //    const auto n = std::min(requestBytes_, decltype(requestBytes_)(65536));
+         //    std::vector<char> b(n);
+         //    boost::asio::read(*this, boost::asio::buffer(b), error);
+         //    if (error)
+         //       return;
+         // }
+
+         if (!responseChunked_ && !responseBytes_)
+            response_headers()["Content-Length"] = "0";
+         
+         write_some(boost::asio::null_buffers(), error);
+         if (error)
+            return;
+         
+         if (responseChunked_) {
+            std::string s;
+            boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
+            write_headers(os, [](const std::string& s) {
+                  if (!s.empty() && s[0] == '/')
+                     return s.substr(1);
+                  return std::string();
+               });
+            os.reset();
+
+            boost::asio::write(*stream(), boost::asio::buffer(s), error);
+            if (error)
+               return;
+         }
+      }
+
+      void finish() {
+         boost::system::error_code error;
+         finish(error);
+         if (error)
+            throw boost::system::system_error(error);
+      }
+      
       std::shared_ptr<T>& stream() {
          return stream_;
       }
@@ -226,6 +309,9 @@ namespace chunky {
       const std::string& request_version() const { return requestVersion_; }
       const std::string& request_resource() const { return requestResource_; }
       const Headers& request_headers() const { return requestHeaders_; }
+
+      unsigned int& response_status() { return responseStatus_; }
+      Headers& response_headers() { return responseHeaders_; }
       
    private:
       std::shared_ptr<T> stream_;
@@ -252,16 +338,20 @@ namespace chunky {
          , responseBytes_(0)
          , responseChunked_(false) {
       }
+
+      static const std::string& crlf() {
+         static const std::string s("\r\n");
+         return s;
+      }
       
       template<typename Handler>
       void async_get_line(Handler&& handler) {
-         static const std::string delimiter("\r\n");
          boost::asio::async_read_until(
-            *stream_, streambuf_, delimiter,
+            *stream_, streambuf_, crlf(),
             [this, handler](const boost::system::error_code& error, size_t nBytes) {
                if (!error) {
                   auto i = boost::asio::buffers_begin(streambuf_.data());
-                  std::string s(i, i + nBytes - delimiter.size());
+                  std::string s(i, i + nBytes - crlf().size());
                   streambuf_.consume(nBytes);
                   std::cout << ">>(" << s << ")\n";
                   handler(error, std::move(s));
@@ -272,17 +362,18 @@ namespace chunky {
       }
 
       std::string get_line() {
-         static const std::string delimiter("\r\n");
          auto nBytes = boost::asio::read_until(
-            *stream_, streambuf_, delimiter);
+            *stream_, streambuf_, crlf());
 
          auto i = boost::asio::buffers_begin(streambuf_.data());
-         std::string s(i, i + nBytes - delimiter.size());
+         std::string s(i, i + nBytes - crlf().size());
          streambuf_.consume(nBytes);
          return s;
       }
+
+      typedef std::function<void(const boost::system::error_code&)> Handler;
       
-      void read_request_line(const std::function<void(const boost::system::error_code&)>& handler) {
+      void read_request_line(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, std::string&& s) {
                   if (!error)
@@ -314,7 +405,7 @@ namespace chunky {
          return boost::system::error_code();
       }
       
-      void read_request_headers(const std::function<void(const boost::system::error_code&)>& handler) {
+      void read_request_headers(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
                   if (!s.empty() && !(error = process_request_header(s)))
@@ -352,7 +443,7 @@ namespace chunky {
          return boost::system::error_code();
       }
 
-      void read_length(const std::function<void(const boost::system::error_code&)>& handler) {
+      void read_length(const Handler& handler = Handler()) {
          try {
             auto contentLength = requestHeaders_.find("content-length");
             if (contentLength != requestHeaders_.end())
@@ -378,7 +469,7 @@ namespace chunky {
          }
       }
       
-      void read_chunk_header(const std::function<void(const boost::system::error_code&)>& handler) {
+      void read_chunk_header(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
                   try {
@@ -400,12 +491,120 @@ namespace chunky {
       }
 
       void process_chunk_header(const std::string& s) {
+         // Chunk header begins with a hexadecimal chunk length.
          requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
          if (!requestBytes_)
             requestChunksPending_ = false;
       }
-   };
 
+      void prepare_write(size_t nBytes, std::string& prefix, std::string& suffix) {
+         // Output status and headers on the first write.
+         boost::iostreams::filtering_ostream ps(boost::iostreams::back_inserter(prefix));
+         if (responseBytes_ == 0) {
+            // Set Date header if not already present.
+            if (response_headers().find("date") == response_headers().end()) {
+               std::time_t t;
+               std::time(&t);
+               std::tm tm = *std::gmtime(&t);
+               char s[30];
+               auto n = strftime(s, sizeof(s), "%a, %d %b %Y %T GMT", &tm);
+               response_headers()["Date"] = std::string(s, n);
+            }
+            
+            // Determine whether to use chunked transfer.
+            auto transferEncoding = response_headers().find("transfer-encoding");
+            if (transferEncoding != response_headers().end() &&
+                transferEncoding->second != "identity") {
+               responseChunked_ = true;
+               response_headers().erase("content-length");
+            }
+            else if (response_headers().count("content-length") == 0 && nBytes) {
+               responseChunked_ = true;
+               response_headers()["Transfer-Encoding"] = "chunked";
+            }
+
+            write_status(ps);
+            write_headers(ps, [](const std::string& s) -> std::string {
+                  if (!s.empty() && s[0] != '/')
+                     return s;
+                  return std::string();
+               });
+         }
+
+         // Output chunk header and trailer if chunking.
+         boost::iostreams::filtering_ostream ss(boost::iostreams::back_inserter(suffix));
+         if (responseChunked_) {
+            ps << boost::format("%x\r\n") % nBytes;
+            if (nBytes)
+               ss << crlf();
+         }
+      }
+
+      void write_status(std::ostream& os) {
+         static std::map<unsigned int, std::string> reasons = {
+            { 100, "Continue" },
+            { 101, "Switching Protocols" },
+            { 200, "OK" },
+            { 201, "Created" },
+            { 202, "Accepted" },
+            { 203, "Non-Authoritative Information" },
+            { 204, "No Content" },
+            { 205, "Reset Content" },
+            { 206, "Partial Content" },
+            { 300, "Multiple Choices" },
+            { 301, "Moved Permanently" },
+            { 302, "Found" },
+            { 303, "See Other" },
+            { 304, "Not Modified" },
+            { 305, "Use Proxy" },
+            { 307, "Temporary Redirect" },
+            { 400, "Bad Request" },
+            { 401, "Unauthorized" },
+            { 402, "Payment Required" },
+            { 403, "Forbidden" },
+            { 404, "Not Found" },
+            { 405, "Method Not Allowed" },
+            { 406, "Not Acceptable" },
+            { 407, "Proxy Authentication Required" },
+            { 408, "Request Timeout" },
+            { 409, "Conflict" },
+            { 410, "Gone" },
+            { 411, "Length Required" },
+            { 412, "Precondition Failed" },
+            { 413, "Payload Too Large" },
+            { 414, "URI Too Long" },
+            { 415, "Unsupported Media Type" },
+            { 416, "Range Not Satisfiable" },
+            { 417, "Expectation Failed" },
+            { 426, "Upgrade Required" },
+            { 500, "Internal Server Error" },
+            { 501, "Not Implemented" },
+            { 502, "Bad Gateway" },
+            { 503, "Service Unavailable" },
+            { 504, "Gateway Timeout" },
+            { 505, "HTTP Version Not Supported" }
+         };
+
+         auto reason = reasons.find(responseStatus_);
+         os << boost::format("HTTP/1.1 %d %s\r\n")
+            % responseStatus_
+            % (reason != reasons.end() ? reason->second : std::string());
+      }
+
+      template<typename Filter>
+      void write_headers(std::ostream& os, Filter filter) {
+         for (const auto& value : response_headers()) {
+            const auto key = filter(value.first);
+            if (!key.empty()) {
+               os << boost::format("%s: %s\r\n")
+                  % key
+                  % value.second;
+            }
+         }
+         os << crlf();
+      }
+   };
+   
    typedef HTTPTemplate<TCP> HTTP;
 }
 
