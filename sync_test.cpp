@@ -26,23 +26,14 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
          static std::string now("now\n");
          static std::string brown("brown\n");
          static std::string cow("cow\n");
-         
-         boost::asio::async_write(
-            *http, boost::asio::buffer(how),
-            [=](const boost::system::error_code&, size_t) {
-               boost::asio::write(*http, boost::asio::buffer(now));
-               boost::asio::write(*http, boost::asio::buffer(brown));
-               boost::asio::async_write(
-                  *http, boost::asio::buffer(cow),
-                  [=](const boost::system::error_code&, size_t) {
-                     http->async_finish([=](const boost::system::error_code& error) {
-                           http.get();
-                           create_http(http->stream());
-                        });
-                  });
-            });
-         // http->finish();
-         // create_http(http->stream());
+
+         boost::asio::write(*http, boost::asio::buffer(how));
+         boost::asio::write(*http, boost::asio::buffer(now));
+         boost::asio::write(*http, boost::asio::buffer(brown));
+         boost::asio::write(*http, boost::asio::buffer(cow));
+         http->finish();
+
+         create_http(tcp);
       });
 }
 

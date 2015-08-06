@@ -238,15 +238,6 @@ namespace chunky {
             });
       }
 
-      static std::shared_ptr<HTTPTemplate> create(
-         const std::shared_ptr<T>& stream) {
-         std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
-         http->read_request_line();
-         http->read_request_headers();
-         http->read_length();
-         return http;
-      }
-
       boost::asio::io_service& get_io_service() {
          return stream()->get_io_service();
       }
