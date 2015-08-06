@@ -276,15 +276,23 @@ namespace chunky {
                            });
                      });
                }
-               else
-                  handler(boost::system::error_code(), nBytes);
+               else {
+                  boost::system::error_code error;
+                  if (nBytes == 0 && bufferSize > 0)
+                     error = boost::asio::error::make_error_code(boost::asio::error::eof);
+                  handler(error, nBytes);
+               }
             });
       }
 
       template<typename MutableBufferSequence>
       size_t read_some(MutableBufferSequence&& buffers) {
+         const auto bufferSize = boost::asio::buffer_size(buffers);
+         auto nBytes = std::min(requestBytes_, bufferSize);
+         if (nBytes == 0 && bufferSize > 0)
+            throw boost::system::system_error(boost::asio::error::make_error_code(boost::asio::error::eof));
+         
          // Take data from the streambuf first.
-         auto nBytes = std::min(requestBytes_, boost::asio::buffer_size(buffers));
          if (streambuf_.size()) {
             nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
             streambuf_.consume(nBytes);
@@ -293,7 +301,7 @@ namespace chunky {
             nBytes = boost::asio::read(*stream(), buffers, boost::asio::transfer_exactly(nBytes));
          
          requestBytes_ -= nBytes;
-         if (requestChunksPending_ && !requestBytes_) {
+         if (bufferSize && requestChunksPending_ && !requestBytes_) {
             get_line();
             read_chunk_header();
          }
