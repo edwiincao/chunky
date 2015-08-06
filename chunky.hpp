@@ -187,10 +187,11 @@ namespace chunky {
       std::deque<char> readBuffer_;
    };
 
+   // This is a wrapped boost::asio TCP stream.
    class TCP : public Stream<boost::asio::ip::tcp::socket> {
    public:
       template<typename CreateHandler>
-      static void async_create(
+      static void async_connect(
          boost::asio::ip::tcp::acceptor& acceptor,
          CreateHandler handler) {
          std::shared_ptr<TCP> tcp(new TCP(acceptor.get_io_service()));
@@ -203,9 +204,17 @@ namespace chunky {
             });
       }
 
+      static std::shared_ptr<TCP> create(boost::asio::ip::tcp::socket&& socket) {
+         return std::shared_ptr<TCP>(new TCP(std::move(socket)));
+      }
+      
    private:
       TCP(boost::asio::io_service& io)
          : Stream<boost::asio::ip::tcp::socket>(io) {
+      }
+
+      TCP(boost::asio::ip::tcp::socket&& socket)
+         : Stream<boost::asio::ip::tcp::socket>(std::move(socket)) {
       }
    };
 
@@ -766,7 +775,6 @@ namespace chunky {
       std::string prepare_write_prefix(size_t nBytes) {
          std::string s;
          boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
-
          if (responseBytes_ == 0) {
             // Set Date header if not already present.
             if (response_headers().find("date") == response_headers().end()) {
