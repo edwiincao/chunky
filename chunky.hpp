@@ -31,7 +31,8 @@ namespace chunky {
       invalid_request_line = 1,
       invalid_request_header,
       unsupported_http_version,
-      invalid_length
+      invalid_content_length,
+      invalid_chunk_length
    };
    
    inline boost::system::error_code make_error_code(errors e) {
@@ -50,8 +51,10 @@ namespace chunky {
                return "Invalid request header";
             case unsupported_http_version:
                return "Unsupported HTTP version";
-            case invalid_length:
-               return "Invalid length";
+            case invalid_content_length:
+               return "Invalid Content-Length";
+            case invalid_chunk_length:
+               return "Invalid chunk length";
             default:
                return "chunky error";
             }
@@ -300,6 +303,7 @@ namespace chunky {
          else
             nBytes = boost::asio::read(*stream(), buffers, boost::asio::transfer_exactly(nBytes));
          
+         // Read the chunk delimiter and next chunk header if chunked.
          requestBytes_ -= nBytes;
          if (bufferSize && requestChunksPending_ && !requestBytes_) {
             get_line();
@@ -346,19 +350,22 @@ namespace chunky {
       size_t write_some(ConstBufferSequence&& buffers, boost::system::error_code& error) {
          auto nBytes = boost::asio::buffer_size(buffers);
 
+         // Write status, headers, and chunk prefix if necessary.
          const auto prefix = prepare_write_prefix(nBytes);
          if (!prefix.empty()) {
             boost::asio::write(*stream(), boost::asio::buffer(prefix), error);
             if (error)
                return 0;
          }
-         
+
+         // Write user data.
          if (nBytes) {
             nBytes = boost::asio::write(*stream(), buffers, error);
             if (error)
                return nBytes;
          }
 
+         // Write chunk suffix if necessary.
          const auto suffix = prepare_write_suffix(nBytes);
          if (!suffix.empty()) {
             boost::asio::write(*stream(), boost::asio::buffer(suffix), error);
@@ -379,6 +386,8 @@ namespace chunky {
          return nBytes;
       }
 
+      // The handler will be called as:
+      //   handler(const boost::system::error_code&);
       template<typename FinishHandler>
       void async_finish(FinishHandler&& handler) {
          flush_input([=](const boost::system::error_code& error) mutable {
@@ -538,6 +547,10 @@ namespace chunky {
          return s;
       }
 
+      // Several helper functions below take a std::function callback.
+      // The callback may be empty for synchronous use (throwing an
+      // exception on an error); otherwise the callback is invoked
+      // asynchronously with the status.
       typedef std::function<void(const boost::system::error_code&)> Handler;
       
       void read_request_line(const Handler& handler = Handler()) {
@@ -554,7 +567,8 @@ namespace chunky {
                throw boost::system::system_error(error);
          }
       }
-      
+
+      // This helper parses an HTTP 1.1 request line.
       boost::system::error_code process_request_line(const std::string& s) {
          std::smatch requestMatch;
          static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
@@ -571,7 +585,8 @@ namespace chunky {
 
          return boost::system::error_code();
       }
-      
+
+      // This helper reads headers from the stream.
       void read_request_headers(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
@@ -588,7 +603,8 @@ namespace chunky {
             }
          }
       }
-      
+
+      // This helper parses a header.
       boost::system::error_code process_request_header(const std::string& s) {
          const auto colon = s.find_first_of(':');
          if (colon == std::string::npos)
@@ -610,6 +626,9 @@ namespace chunky {
          return boost::system::error_code();
       }
 
+      // This helper sets requestBytes_, which is the number of request
+      // body bytes available to be read. It handles both Content-Length
+      // and Transfer-Encoding (chunked).
       void read_length(const Handler& handler = Handler()) {
          try {
             auto contentLength = requestHeaders_.find("content-length");
@@ -628,14 +647,15 @@ namespace chunky {
          }
          catch (...) {
             // std::stoul() threw on the Content-Length header.
-            auto error = make_error_code(invalid_length);
+            auto error = make_error_code(invalid_content_length);
             if (handler)
                handler(error);
             else
                throw boost::system::system_error(error);
          }
       }
-      
+
+      // This helper reads a chunk length header.
       void read_chunk_header(const Handler& handler = Handler()) {
          assert(requestBytes_ == 0);
          assert(requestChunksPending_);
@@ -655,7 +675,7 @@ namespace chunky {
                   }
                   catch (...) {
                      // std::stoul() threw on the chunk header.
-                     handler(make_error_code(invalid_length));
+                     handler(make_error_code(invalid_chunk_length));
                   }
                });
          }
@@ -667,6 +687,7 @@ namespace chunky {
          }
       }
 
+      // This helper parses a chunk length header.
       void process_chunk_header(const std::string& s) {
          // Chunk header begins with a hexadecimal chunk length.
          requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
@@ -674,6 +695,8 @@ namespace chunky {
             requestChunksPending_ = false;
       }
 
+      // This helper ensures that the entire request has been consumed
+      // from the stream.
       void flush_input(const Handler& handler = Handler()) {
          if (handler) {
             if (requestBytes_) {
