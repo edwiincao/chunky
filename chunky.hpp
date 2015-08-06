@@ -1,8 +1,6 @@
 #ifndef CHUNKY_HPP
 #define CHUNKY_HPP
 
-#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
-
 #include <algorithm>
 #include <cassert>
 #include <ctime>

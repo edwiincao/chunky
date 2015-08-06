@@ -13,11 +13,9 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
             return;
          }
 
-         std::cout << http->request_method()
-                   << ' ' << http->request_resource()
-                   << '\n';
-         for (const auto& header : http->request_headers())
-            std::cout << header.first << ": " << header.second << '\n';
+         std::cout << boost::format("%s %s\n")
+            % http->request_method()
+            % http->request_resource();
 
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/plain";
