@@ -13,6 +13,7 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
             return;
          }
 
+         std::cout << "create_http\n";
          std::cout << http->request_method()
                    << ' ' << http->request_resource()
                    << '\n';
@@ -24,6 +25,8 @@ static void create_http(const std::shared_ptr<chunky::TCP>& tcp) {
 
          boost::asio::write(*http, boost::asio::buffer(std::string("how now brown cow")));
          http->async_finish([=](const boost::system::error_code& error) {
+               std::cout << "async_finish handler\n";
+               http.get();
                create_http(http->stream());
             });
          // http->finish();

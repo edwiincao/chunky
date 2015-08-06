@@ -86,16 +86,27 @@ namespace chunky {
          const MutableBufferSequence& buffers,
          ReadHandler&& handler) {
          if (!readBuffer_.empty()) {
+            // Call the synchronous function. It won't block because
+            // the data are buffered.
             boost::system::error_code error;
             const auto nBytes = read_some(buffers, error);
             strand_.post([=]() mutable {
+                  std::cout << boost::format(">>(%s) async socket streambuf\n")
+                     % std::string(boost::asio::buffer_cast<char*>(buffers), nBytes);
                   handler(error, nBytes);
                });
          }
          else {
             auto this_ = this->shared_from_this();
             strand_.dispatch([=]() mutable {
-                  this_->stream_.async_read_some(buffers, strand_.wrap(handler));
+                  // this_->stream_.async_read_some(buffers, strand_.wrap(handler));
+                  this_->stream_.async_read_some(
+                     buffers,
+                     [=](const boost::system::error_code& error, size_t nBytes) mutable {
+                        std::cout << boost::format(">>(%s) async socket\n")
+                           % std::string(boost::asio::buffer_cast<char*>(buffers), nBytes);
+                        handler(error, nBytes);
+                     });
                });
          }
       }
@@ -155,6 +166,8 @@ namespace chunky {
       
       template<typename ConstBufferSequence>
       void put_back(const ConstBufferSequence& buffers) {
+         std::cout << boost::format("put_back (%s)\n")
+            % std::string(boost::asio::buffers_begin(buffers), boost::asio::buffers_end(buffers));
          readBuffer_.insert(
             readBuffer_.begin(),
             boost::asio::buffers_begin(buffers), boost::asio::buffers_end(buffers));
@@ -244,11 +257,12 @@ namespace chunky {
          auto nBytes = std::min(requestBytes_, boost::asio::buffer_size(buffers));
          if (streambuf_.size()) {
             nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
+            std::cout << boost::format(">>(%s) async streambuf\n")
+               % std::string(boost::asio::buffer_cast<char*>(buffers), nBytes);
             streambuf_.consume(nBytes);
 
             get_io_service().post([=]() mutable {
                   async_read_some_helper(nBytes, handler);
-                  handler(boost::system::error_code(), nBytes);
                });
             return;
          }
@@ -269,12 +283,16 @@ namespace chunky {
       void async_read_some_helper(size_t nBytes, ReadHandler&& handler) {
          requestBytes_ -= nBytes;
          if (requestChunksPending_ && !requestBytes_) {
-            async_get_line([=](const boost::system::error_code& error, const std::string&) mutable {
+            std::cout << "getting blank line\n";
+            async_get_line([=](const boost::system::error_code& error, const std::string& s) mutable {
+                  assert(s.empty());
+                  std::cout << "got blank line\n";
                   if (error) {
                      handler(error, nBytes);
                      return;
                   }
                         
+                  std::cout << "reading chunk_header\n";
                   read_chunk_header([=](const boost::system::error_code& error) mutable {
                         handler(error, nBytes);
                      });
@@ -395,6 +413,7 @@ namespace chunky {
                }
                
                // Replace any unused bytes read by get_line().
+               std::cout << "replacing unused bytes (async_finish)\n";
                if (auto unused = streambuf_.size()) {
                   stream_->put_back(streambuf_.data());
                   streambuf_.consume(unused);
@@ -523,7 +542,7 @@ namespace chunky {
                   auto i = boost::asio::buffers_begin(streambuf_.data());
                   std::string s(i, i + (nBytes - crlf().size()));
                   streambuf_.consume(nBytes);
-                  std::cout << ">>(" << s << ")\n";
+                  std::cout << ">>(" << s << ") async_get_line\n";
                   handler(error, std::move(s));
                }
                else
@@ -537,7 +556,7 @@ namespace chunky {
 
          auto i = boost::asio::buffers_begin(streambuf_.data());
          std::string s(i, i + nBytes - crlf().size());
-         std::cout << ">>(" << s << ")\n";
+         std::cout << ">>(" << s << ") get_line\n";
          streambuf_.consume(nBytes);
          return s;
       }
@@ -674,6 +693,7 @@ namespace chunky {
       void process_chunk_header(const std::string& s) {
          // Chunk header begins with a hexadecimal chunk length.
          requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
+         std::cout << boost::format("chunk header %d\n") % requestBytes_;
          if (!requestBytes_)
             requestChunksPending_ = false;
       }
