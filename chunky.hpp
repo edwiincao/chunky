@@ -244,8 +244,10 @@ namespace chunky {
       
       template<typename MutableBufferSequence, typename ReadHandler>
       void async_read_some(MutableBufferSequence&& buffers, ReadHandler&& handler) {
+         const auto bufferSize = boost::asio::buffer_size(buffers);
+         auto nBytes = std::min(requestBytes_, bufferSize);
+         
          // Take data from the streambuf first.
-         auto nBytes = std::min(requestBytes_, boost::asio::buffer_size(buffers));
          if (streambuf_.size()) {
             nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
             streambuf_.consume(nBytes);
@@ -263,7 +265,7 @@ namespace chunky {
 
                // Read the chunk delimiter and next chunk header if chunked.
                requestBytes_ -= nBytes;
-               if (requestChunksPending_ && !requestBytes_) {
+               if (bufferSize && requestChunksPending_ && !requestBytes_) {
                   async_get_line([=](const boost::system::error_code& error, const std::string& s) mutable {
                         assert(s.empty());
                         if (error) {
@@ -314,48 +316,31 @@ namespace chunky {
 
       template<typename ConstBufferSequence, typename WriteHandler>
       void async_write_some(ConstBufferSequence&& buffers, WriteHandler&& handler) {
-         auto prefix = std::make_shared<std::string>();
-         auto suffix = std::make_shared<std::string>();
+         // Write status, headers, and chunk prefix if necessary.
          auto nBytes = boost::asio::buffer_size(buffers);
-         prepare_write(nBytes, *prefix, *suffix);
-
-         // TODO: optimizations for empty prefix, suffix, data
-         
-         boost::asio::async_write(
-            *stream(), boost::asio::buffer(*prefix),
-            [=](const boost::system::error_code& error, size_t) mutable {
-               prefix.get();    // ensures shared_ptr lifetime
-               if (error) {
-                  handler(error, 0);
-                  return;
-               }
-
-               boost::asio::async_write(
-                  *stream(), buffers,
-                  [=](const boost::system::error_code& error, size_t nBytes) mutable {
-                     if (error) {
-                        handler(error, nBytes);
-                        return;
-                     }
-
-                     boost::asio::async_write(
-                        *stream(), boost::asio::buffer(*suffix),
-                        [=](const boost::system::error_code& error, size_t) mutable {
-                           suffix.get(); // ensures shared_ptr lifetime
-                           responseBytes_ += nBytes;
-                           handler(error, nBytes);
-                        });
-                  });
-            });
+         auto prefix = std::make_shared<std::string>(prepare_write_prefix(nBytes));
+         if (!prefix->empty()) {
+            boost::asio::async_write(
+               *stream(), boost::asio::buffer(*prefix),
+               [=](const boost::system::error_code& error, size_t) mutable {
+                  prefix.get();
+                  if (error) {
+                     handler(error, 0);
+                     return;
+                  }
+                  
+                  async_write_some_1(buffers, handler);
+               });
+         }
+         else
+            async_write_some_1(buffers, handler);
       }
       
       template<typename ConstBufferSequence>
       size_t write_some(ConstBufferSequence&& buffers, boost::system::error_code& error) {
-         std::string prefix;
-         std::string suffix;
          auto nBytes = boost::asio::buffer_size(buffers);
-         prepare_write(nBytes, prefix, suffix);
 
+         const auto prefix = prepare_write_prefix(nBytes);
          if (!prefix.empty()) {
             boost::asio::write(*stream(), boost::asio::buffer(prefix), error);
             if (error)
@@ -367,7 +352,8 @@ namespace chunky {
             if (error)
                return nBytes;
          }
-         
+
+         const auto suffix = prepare_write_suffix(nBytes);
          if (!suffix.empty()) {
             boost::asio::write(*stream(), boost::asio::buffer(suffix), error);
             if (error)
@@ -408,7 +394,7 @@ namespace chunky {
                // Output final empty chunk.
                async_write_some(
                   boost::asio::null_buffers(),
-                  [=](const boost::system::error_code& error, size_t) {
+                  [=](const boost::system::error_code& error, size_t) mutable {
                      if (error) {
                         handler(error);
                         return;
@@ -427,7 +413,7 @@ namespace chunky {
 
                         boost::asio::async_write(
                            *stream(), boost::asio::buffer(s),
-                           [=](const boost::system::error_code& error, size_t) {
+                           [=](const boost::system::error_code& error, size_t) mutable {
                               handler(error);
                            });
                      }
@@ -711,9 +697,47 @@ namespace chunky {
          }
       }
 
-      void prepare_write(size_t nBytes, std::string& prefix, std::string& suffix) {
-         // Output status and headers on the first write.
-         boost::iostreams::filtering_ostream ps(boost::iostreams::back_inserter(prefix));
+      template<typename ConstBufferSequence, typename WriteHandler>
+      void async_write_some_1(ConstBufferSequence&& buffers, WriteHandler&& handler) {
+         // Write user data.
+         if (boost::asio::buffer_size(buffers)) {
+            boost::asio::async_write(
+               *stream(), buffers,
+               [=](const boost::system::error_code& error, size_t nBytes) mutable {
+                  if (error) {
+                     handler(error, nBytes);
+                     return;
+                  }
+
+                  async_write_some_2(buffers, handler);
+               });
+         }
+         else
+            async_write_some_2(buffers, handler);
+      }
+         
+      template<typename ConstBufferSequence, typename WriteHandler>
+      void async_write_some_2(ConstBufferSequence&& buffers, WriteHandler&& handler) {
+         // Write chunk suffix if necessary.
+         const auto nBytes = boost::asio::buffer_size(buffers);
+         auto suffix = std::make_shared<std::string>(prepare_write_suffix(nBytes));
+         if (!suffix->empty()) {
+            boost::asio::async_write(
+               *stream(), boost::asio::buffer(*suffix),
+               [=](const boost::system::error_code& error, size_t) mutable {
+                  suffix.get();
+                  responseBytes_ += nBytes;
+                  handler(error, nBytes);
+               });
+         }
+         else
+            handler(boost::system::error_code(), nBytes);
+      }
+      
+      std::string prepare_write_prefix(size_t nBytes) {
+         std::string s;
+         boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
+
          if (responseBytes_ == 0) {
             // Set Date header if not already present.
             if (response_headers().find("date") == response_headers().end()) {
@@ -737,21 +761,24 @@ namespace chunky {
                response_headers()["Transfer-Encoding"] = "chunked";
             }
 
-            write_status(ps);
-            write_headers(ps, [](const std::string& s) -> std::string {
+            write_status(os);
+            write_headers(os, [](const std::string& s) -> std::string {
                   if (!s.empty() && s[0] != '/')
                      return s;
                   return std::string();
                });
          }
 
-         // Output chunk header and trailer if chunking.
-         boost::iostreams::filtering_ostream ss(boost::iostreams::back_inserter(suffix));
-         if (responseChunked_) {
-            ps << boost::format("%x\r\n") % nBytes;
-            if (nBytes)
-               ss << crlf();
-         }
+         if (responseChunked_)
+            os << boost::format("%x\r\n") % nBytes;
+         
+         os.reset();
+         return s;
+      }
+
+      std::string prepare_write_suffix(size_t nBytes) {
+         // Add crlf to all chunks except the final one.
+         return (responseChunked_ && nBytes) ? crlf() : std::string();
       }
 
       void write_status(std::ostream& os) {
