@@ -64,7 +64,14 @@ namespace chunky {
       return boost::system::error_code(
          static_cast<int>(e), category);
    }
-   
+
+   // This is a wrapper for a boost::asio stream class (e.g.
+   // boost::asio::ip::tcp::socket). It provides three features:
+   //
+   // 1. Asynchronous operations are thread-safe via a strand.
+   // 2. A put back buffer is available for overread data.
+   // 3. Stream lifetime is ensured (via shared_ptr) for asynchronous
+   //    operations.
    template<typename T>
    class Stream : public std::enable_shared_from_this<Stream<T> >
                 , boost::noncopyable {
@@ -97,7 +104,9 @@ namespace chunky {
          else {
             auto this_ = this->shared_from_this();
             strand_.dispatch([=]() mutable {
-                  this_->stream_.async_read_some(buffers, strand_.wrap(handler));
+                  // Wrapping the handler is unnecessary because the
+                  // call is not a composed operation.
+                  this_->stream_.async_read_some(buffers, handler);
                });
          }
       }
@@ -108,7 +117,9 @@ namespace chunky {
          WriteHandler&& handler) {
          auto this_ = this->shared_from_this();
          strand_.dispatch([=]() mutable {
-               this_->stream_.async_write_some(buffers, strand_.wrap(handler));
+               // Wrapping the handler is unnecessary because the call
+               // is not a composed operation.
+               this_->stream_.async_write_some(buffers, handler);
             });
       }
 
@@ -317,9 +328,12 @@ namespace chunky {
          auto nBytes = boost::asio::buffer_size(buffers);
          prepare_write(nBytes, *prefix, *suffix);
 
+         // TODO: optimizations for empty prefix, suffix, data
+         
          boost::asio::async_write(
             *stream(), boost::asio::buffer(*prefix),
-            [=](const boost::system::error_code& error, size_t) {
+            [=](const boost::system::error_code& error, size_t) mutable {
+               prefix.get();    // ensures shared_ptr lifetime
                if (error) {
                   handler(error, 0);
                   return;
@@ -327,7 +341,7 @@ namespace chunky {
 
                boost::asio::async_write(
                   *stream(), buffers,
-                  [=](const boost::system::error_code& error, size_t nBytes) {
+                  [=](const boost::system::error_code& error, size_t nBytes) mutable {
                      if (error) {
                         handler(error, nBytes);
                         return;
@@ -335,7 +349,8 @@ namespace chunky {
 
                      boost::asio::async_write(
                         *stream(), boost::asio::buffer(*suffix),
-                        [=](const boost::system::error_code& error, size_t) {
+                        [=](const boost::system::error_code& error, size_t) mutable {
+                           suffix.get(); // ensures shared_ptr lifetime
                            responseBytes_ += nBytes;
                            handler(error, nBytes);
                         });
