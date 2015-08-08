@@ -219,7 +219,14 @@ namespace chunky {
       static std::shared_ptr<TCP> create(boost::asio::ip::tcp::socket&& socket) {
          return std::shared_ptr<TCP>(new TCP(std::move(socket)));
       }
-      
+
+      ~TCP() {
+         if (stream().is_open()) {
+            boost::system::error_code error;
+            stream().shutdown(boost::asio::ip::tcp::socket::shutdown_both, error);
+            stream().close(error);
+         }
+      }
    private:
       TCP(boost::asio::io_service& io)
          : Stream<boost::asio::ip::tcp::socket>(io) {
