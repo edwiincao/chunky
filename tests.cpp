@@ -51,6 +51,8 @@ public:
          tcp,
          [=](const boost::system::error_code& error, const std::shared_ptr<HTTP>& http) {
             if (error) {
+               if (error != boost::asio::error::make_error_code(boost::asio::error::misc_errors::eof))
+                  LOG(info) << error.message();
                return;
             }
          
@@ -58,6 +60,8 @@ public:
                % http->request_method()
                % http->request_resource();
             handler_(http);
+
+            connectHandler(boost::system::error_code(), tcp);
          });
    }
 };
