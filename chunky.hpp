@@ -17,10 +17,7 @@ limitations under the License.
 */
 
 #include <algorithm>
-#include <cassert>
-#include <ctime>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <regex>
 #include <string>
@@ -658,25 +655,26 @@ namespace chunky {
             auto contentLength = requestHeaders_.find("content-length");
             if (contentLength != requestHeaders_.end())
                requestBytes_ = static_cast<size_t>(std::stoul(contentLength->second));
-
-            auto transferEncoding = requestHeaders_.find("transfer-encoding");
-            if (transferEncoding != requestHeaders_.end() &&
-                transferEncoding->second != "identity") {
-               requestBytes_ = 0U;
-               requestChunksPending_ = true;
-               read_chunk_header(handler);
-            }
-            else if (handler)
-               handler(boost::system::error_code());
          }
          catch (...) {
             // std::stoul() threw on the Content-Length header.
             auto error = make_error_code(invalid_content_length);
-            if (handler)
+            if (handler) {
                handler(error);
-            else
-               throw boost::system::system_error(error);
+               return;
+            }
+            throw boost::system::system_error(error);
          }
+
+         auto transferEncoding = requestHeaders_.find("transfer-encoding");
+         if (transferEncoding != requestHeaders_.end() &&
+             transferEncoding->second != "identity") {
+            requestBytes_ = 0U;
+            requestChunksPending_ = true;
+            read_chunk_header(handler);
+         }
+         else if (handler)
+            handler(boost::system::error_code());
       }
 
       // This helper reads a chunk length header.
@@ -692,15 +690,17 @@ namespace chunky {
 
                   try {
                      process_chunk_header(s);
-                     if (!requestChunksPending_)
-                        read_request_headers(handler);
-                     else
-                        handler(error);
                   }
                   catch (...) {
                      // std::stoul() threw on the chunk header.
                      handler(make_error_code(invalid_chunk_length));
+                     return;
                   }
+
+                  if (!requestChunksPending_)
+                     read_request_headers(handler);
+                  else
+                     handler(error);
                });
          }
          else {
