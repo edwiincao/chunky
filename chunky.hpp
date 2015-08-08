@@ -273,45 +273,45 @@ namespace chunky {
       
       template<typename MutableBufferSequence, typename ReadHandler>
       void async_read_some(MutableBufferSequence&& buffers, ReadHandler&& handler) {
-         const auto bufferSize = boost::asio::buffer_size(buffers);
-         auto nBytes = std::min(requestBytes_, bufferSize);
-         
          // Take data from the streambuf first.
+         size_t nBytesRead = 0;
+         const auto bufferSize = boost::asio::buffer_size(buffers);
          if (streambuf_.size()) {
-            nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
+            auto nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), requestBytes_);
             streambuf_.consume(nBytes);
             requestBytes_ -= nBytes;
-            nBytes = 0;
+            nBytesRead += nBytes;
          }
 
          boost::asio::async_read(
-            *stream(), buffers, boost::asio::transfer_exactly(nBytes),
+            *stream(), buffers, boost::asio::transfer_exactly(nBytesRead ? 0 : requestBytes_),
             [=](const boost::system::error_code& error, size_t nBytes) mutable {
+               requestBytes_ -= nBytes;
+               nBytesRead += nBytes;
                if (error) {
-                  handler(error, nBytes);
+                  handler(error, nBytesRead);
                   return;
                }
 
                // Read the chunk delimiter and next chunk header if chunked.
-               requestBytes_ -= nBytes;
                if (bufferSize && requestChunksPending_ && !requestBytes_) {
                   async_get_line([=](const boost::system::error_code& error, const std::string& s) mutable {
                         assert(s.empty());
                         if (error) {
-                           handler(error, nBytes);
+                           handler(error, nBytesRead);
                            return;
                         }
                         
                         read_chunk_header([=](const boost::system::error_code& error) mutable {
-                              handler(error, nBytes);
+                              handler(error, nBytesRead);
                            });
                      });
                }
                else {
                   boost::system::error_code error;
-                  if (nBytes == 0 && bufferSize > 0)
+                  if (nBytesRead == 0 && bufferSize > 0)
                      error = boost::asio::error::make_error_code(boost::asio::error::eof);
-                  handler(error, nBytes);
+                  handler(error, nBytesRead);
                }
             });
       }
