@@ -51,8 +51,7 @@ public:
          tcp,
          [=](const boost::system::error_code& error, const std::shared_ptr<HTTP>& http) {
             if (error) {
-               if (error != boost::asio::error::make_error_code(boost::asio::error::misc_errors::eof))
-                  LOG(info) << error.message();
+               LOG(info) << error.message();
                return;
             }
          
@@ -81,7 +80,7 @@ static size_t readCB(char *s, size_t size, size_t n, void *data) {
 BOOST_AUTO_TEST_CASE(Minimal) {
    Server server([](const std::shared_ptr<HTTP>& http) {
          BOOST_CHECK_EQUAL(http->request_method(), "GET");
-         BOOST_CHECK_EQUAL(http->request_resource(), "/foo");
+         BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
          
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/plain";
@@ -91,7 +90,7 @@ BOOST_AUTO_TEST_CASE(Minimal) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   auto url = (boost::format("http://localhost:%d/foo") % server.port()).str();
+   auto url = (boost::format("http://localhost:%d/Minimal") % server.port()).str();
    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
    auto status = curl_easy_perform(curl);
@@ -105,7 +104,7 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
 
    Server server([=](const std::shared_ptr<HTTP>& http) {
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
-         BOOST_CHECK_EQUAL(http->request_resource(), "/foo");
+         BOOST_CHECK_EQUAL(http->request_resource(), "/ContentLength");
 
          boost::asio::streambuf body;
          boost::system::error_code error;
@@ -126,25 +125,32 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+   for (int i = 0; i < 8; ++i) {
+      curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
    
-   auto url = (boost::format("http://localhost:%d/foo") % server.port()).str();
-   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      auto url = (boost::format("http://localhost:%d/ContentLength") % server.port()).str();
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
-   std::istringstream is(upData);
-   curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
-   curl_easy_setopt(curl, CURLOPT_READDATA, &is);
-   curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
+      curl_slist* headers = curl_slist_append(nullptr, "Expect:");
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-   std::ostringstream os;
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeCB);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &os);
+      std::istringstream is(upData);
+      curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
+      curl_easy_setopt(curl, CURLOPT_READDATA, &is);
+      curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
+
+      std::ostringstream os;
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeCB);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &os);
    
-   auto status = curl_easy_perform(curl);
-   BOOST_CHECK_EQUAL(status, CURLE_OK);
+      auto status = curl_easy_perform(curl);
+      BOOST_CHECK_EQUAL(status, CURLE_OK);
+      BOOST_CHECK_EQUAL(os.str(), dnData);
+
+      curl_slist_free_all(headers);
+   }
+   
    curl_easy_cleanup(curl);
-
-   BOOST_CHECK_EQUAL(os.str(), dnData);
 }
 
 BOOST_AUTO_TEST_CASE(Chunked) {
@@ -153,7 +159,7 @@ BOOST_AUTO_TEST_CASE(Chunked) {
 
    Server server([=](const std::shared_ptr<HTTP>& http) {
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
-         BOOST_CHECK_EQUAL(http->request_resource(), "/foo");
+         BOOST_CHECK_EQUAL(http->request_resource(), "/Chunked");
 
          boost::asio::streambuf body;
          boost::system::error_code error;
@@ -173,28 +179,31 @@ BOOST_AUTO_TEST_CASE(Chunked) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+   for (int i = 0; i < 8; ++i) {
+      curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
    
-   auto url = (boost::format("http://localhost:%d/foo") % server.port()).str();
-   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      auto url = (boost::format("http://localhost:%d/Chunked") % server.port()).str();
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
-   curl_slist* headers = nullptr;
-   headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
-   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+      curl_slist* headers = curl_slist_append(nullptr, "Expect:");
+      headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
    
-   std::istringstream is(upData);
-   curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
-   curl_easy_setopt(curl, CURLOPT_READDATA, &is);
-   curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
+      std::istringstream is(upData);
+      curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
+      curl_easy_setopt(curl, CURLOPT_READDATA, &is);
+      curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
 
-   std::ostringstream os;
-   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeCB);
-   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &os);
+      std::ostringstream os;
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeCB);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &os);
    
-   auto status = curl_easy_perform(curl);
-   BOOST_CHECK_EQUAL(status, CURLE_OK);
+      auto status = curl_easy_perform(curl);
+      BOOST_CHECK_EQUAL(status, CURLE_OK);
+      BOOST_CHECK_EQUAL(os.str(), dnData);
+
+      curl_slist_free_all(headers);
+   }
+
    curl_easy_cleanup(curl);
-   curl_slist_free_all(headers);
-
-   BOOST_CHECK_EQUAL(os.str(), dnData);
 }
