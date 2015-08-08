@@ -29,9 +29,11 @@ if sys.platform.startswith('darwin'):
     env.Append(CXXFLAGS = '-std=c++11')
 
 elif sys.platform.startswith('linux'):
-    env.Append(CXXFLAGS = '-std=c++0x')
+    env.Append(CXXFLAGS = ['-std=c++0x', '-pthread'])
+    env.Append(LINKFLAGS = ['-pthread'])
 
-env.Append(LIBS=['boost_system-mt'])
+env.Append(LIBS=['curl'])
+env.Append(LIBS=['boost_log-mt', 'boost_system-mt', 'boost_unit_test_framework-mt'])
 
 # Project configuration.
 env.Append(CXXFLAGS=['-march=native'])
