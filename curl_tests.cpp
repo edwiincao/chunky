@@ -1,4 +1,4 @@
-#define BOOST_TEST_MODULE basic
+#define BOOST_TEST_MODULE curl
 #define BOOST_LOG_DYN_LINK
 #define BOOST_TEST_DYN_LINK
 
