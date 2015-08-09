@@ -232,8 +232,6 @@ BOOST_AUTO_TEST_CASE(AsyncContentLength) {
          boost::asio::async_read(
             *http, *body,
             [=](const error_code& error, size_t nBytes) {
-               if (error)
-                  LOG(error) << error.message();
                std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
                BOOST_CHECK_EQUAL(s, upData);
                
@@ -303,9 +301,6 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
          boost::asio::async_read(
             *http, *body,
             [=](const error_code& error, size_t nBytes) {
-               if (error)
-                  LOG(error) << error.message();
-               
                std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
                BOOST_CHECK_EQUAL(s, upData);
                
@@ -317,13 +312,13 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
                   [=](const error_code& error, size_t nBytes) {
                      BOOST_CHECK_EQUAL(nBytes, dnData.size());
                      if (error) {
-                        LOG(error) << error.message();
+                        LOG(error) << "async_write handler " << error.message();
                         return;
                      }
 
                      http->async_finish([=](const error_code& error) {
                            if (error) {
-                              LOG(error) << error.message();
+                              LOG(error) << "async_finish handler\n" << error.message();
                               return;
                            }
                            serve(http->stream());
@@ -354,7 +349,7 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
       std::ostringstream os;
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeCB);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &os);
-   
+
       auto status = curl_easy_perform(curl);
       BOOST_CHECK_EQUAL(status, CURLE_OK);
       BOOST_CHECK_EQUAL(os.str(), dnData);

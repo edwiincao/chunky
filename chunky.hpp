@@ -764,6 +764,7 @@ namespace chunky {
             boost::asio::async_write(
                *stream(), buffers,
                [=](const boost::system::error_code& error, size_t nBytes) mutable {
+                  responseBytes_ += nBytes;
                   if (error) {
                      handler(error, nBytes);
                      return;
@@ -786,7 +787,6 @@ namespace chunky {
                *stream(), boost::asio::buffer(*suffix),
                [=](const boost::system::error_code& error, size_t) mutable {
                   suffix.get();
-                  responseBytes_ += nBytes;
                   handler(error, nBytes);
                });
          }
