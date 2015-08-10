@@ -23,6 +23,7 @@ limitations under the License.
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
@@ -432,56 +433,64 @@ namespace chunky {
             throw boost::system::system_error(error);
          return nBytes;
       }
-      
+
       template<typename ConstBufferSequence, typename WriteHandler>
       void async_write_some(ConstBufferSequence&& buffers, WriteHandler&& handler) {
-         // Write status, headers, and chunk prefix if necessary.
+         // Add prefix (response line, response headers, and chunk
+         // header) and suffix (chunk delimiter) around the client
+         // buffers.
          auto nBytes = boost::asio::buffer_size(buffers);
+         auto chunk = std::make_shared<std::vector<boost::asio::const_buffer> >();
+         
          auto prefix = std::make_shared<std::string>(prepare_write_prefix(nBytes));
-         if (!prefix->empty()) {
-            boost::asio::async_write(
-               *stream(), boost::asio::buffer(*prefix),
-               [=](const boost::system::error_code& error, size_t) mutable {
-                  prefix.get();
-                  if (error) {
-                     handler(error, 0);
-                     return;
-                  }
-                  
-                  async_write_some_1(buffers, handler);
-               });
-         }
-         else
-            async_write_some_1(buffers, handler);
+         if (!prefix->empty())
+            chunk->push_back(boost::asio::const_buffer(prefix->data(), prefix->size()));
+
+         for (const auto& buffer : buffers)
+            chunk->push_back(boost::asio::const_buffer(buffer));
+         
+         auto suffix = std::make_shared<std::string>(prepare_write_suffix(nBytes));
+         if (!suffix->empty())
+            chunk->push_back(boost::asio::const_buffer(suffix->data(), suffix->size()));
+
+         boost::asio::async_write(
+            *stream(), *chunk,
+            [=](const error_code& error, size_t) mutable {
+               if (error) {
+                  handler(error, 0);
+                  return;
+               }
+
+               responseBytes_ += nBytes;
+               handler(error, nBytes);
+
+               // References for lifetime extension.
+               prefix.get();
+               suffix.get();
+               chunk.get();
+            });
       }
       
       template<typename ConstBufferSequence>
       size_t write_some(ConstBufferSequence&& buffers, boost::system::error_code& error) {
+         // Add prefix (response line, response headers, and chunk
+         // header) and suffix (chunk delimiter) around the client
+         // buffers.
          auto nBytes = boost::asio::buffer_size(buffers);
+         auto chunk = std::make_shared<std::vector<boost::asio::const_buffer> >();
+         
+         auto prefix = std::make_shared<std::string>(prepare_write_prefix(nBytes));
+         if (!prefix->empty())
+            chunk->push_back(boost::asio::const_buffer(prefix->data(), prefix->size()));
 
-         // Write status, headers, and chunk prefix if necessary.
-         const auto prefix = prepare_write_prefix(nBytes);
-         if (!prefix.empty()) {
-            boost::asio::write(*stream(), boost::asio::buffer(prefix), error);
-            if (error)
-               return 0;
-         }
+         for (const auto& buffer : buffers)
+            chunk->push_back(boost::asio::const_buffer(buffer));
+         
+         auto suffix = std::make_shared<std::string>(prepare_write_suffix(nBytes));
+         if (!suffix->empty())
+            chunk->push_back(boost::asio::const_buffer(suffix->data(), suffix->size()));
 
-         // Write user data.
-         if (nBytes) {
-            nBytes = boost::asio::write(*stream(), buffers, error);
-            if (error)
-               return nBytes;
-         }
-
-         // Write chunk suffix if necessary.
-         const auto suffix = prepare_write_suffix(nBytes);
-         if (!suffix.empty()) {
-            boost::asio::write(*stream(), boost::asio::buffer(suffix), error);
-            if (error)
-               return 0;
-         }
-
+         boost::asio::write(*stream(), *chunk, error);
          responseBytes_ += nBytes;
          return nBytes;
       }
@@ -780,6 +789,11 @@ namespace chunky {
                   std::string value = s.substr(colon + 1);
                   boost::algorithm::trim_left(value);
                   requestHeaders_.insert({{std::move(key), std::move(value)}});
+
+                  // Recursion could overflow the stack if loadBufferFunc
+                  // is synchronous, but large numbers of trailers are
+                  // not expected.
+                  read_request_trailers(loadBufferFunc, handler);
                }
                else
                   handler(error);
@@ -817,43 +831,6 @@ namespace chunky {
          }
       }
 
-      template<typename ConstBufferSequence, typename WriteHandler>
-      void async_write_some_1(ConstBufferSequence&& buffers, WriteHandler&& handler) {
-         // Write user data.
-         if (boost::asio::buffer_size(buffers)) {
-            boost::asio::async_write(
-               *stream(), buffers,
-               [=](const boost::system::error_code& error, size_t nBytes) mutable {
-                  responseBytes_ += nBytes;
-                  if (error) {
-                     handler(error, nBytes);
-                     return;
-                  }
-
-                  async_write_some_2(buffers, handler);
-               });
-         }
-         else
-            async_write_some_2(buffers, handler);
-      }
-         
-      template<typename ConstBufferSequence, typename WriteHandler>
-      void async_write_some_2(ConstBufferSequence&& buffers, WriteHandler&& handler) {
-         // Write chunk suffix if necessary.
-         const auto nBytes = boost::asio::buffer_size(buffers);
-         auto suffix = std::make_shared<std::string>(prepare_write_suffix(nBytes));
-         if (!suffix->empty()) {
-            boost::asio::async_write(
-               *stream(), boost::asio::buffer(*suffix),
-               [=](const boost::system::error_code& error, size_t) mutable {
-                  suffix.get();
-                  handler(error, nBytes);
-               });
-         }
-         else
-            handler(boost::system::error_code(), nBytes);
-      }
-      
       std::string prepare_write_prefix(size_t nBytes) {
          std::string s;
          boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
