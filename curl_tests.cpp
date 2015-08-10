@@ -397,29 +397,23 @@ class AsyncBigServer : public Server {
       BOOST_CHECK_EQUAL(http->request_method(), "PUT");
       BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncBig");
 
-      auto body = std::make_shared<boost::asio::streambuf>();
-      boost::asio::async_read(
-         *http, *body,
-         [=](const error_code& error, size_t nBytes) {
-            std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
-            BOOST_CHECK_EQUAL(s, upData);
-               
-            http->response_status() = 200;
-            http->response_headers()["Content-Type"] = "text/plain";
+      http->response_status() = 200;
+      http->response_headers()["Content-Type"] = "text/plain";
 
-            write(http, 65536, [=](const error_code& error) {
+      // Don't read; let finish() drain the input stream.
+      
+      write(http, 1 << 20, [=](const error_code& error) {
+            if (error) {
+               LOG(error) << error.message();
+               return;
+            }
+
+            http->async_finish([=](const error_code& error) {
                   if (error) {
                      LOG(error) << error.message();
                      return;
                   }
-
-                  http->async_finish([=](const error_code& error) {
-                        if (error) {
-                           LOG(error) << error.message();
-                           return;
-                        }
-                        serve(http->stream());
-                     });
+                  serve(http->stream());
                });
          });
    }
@@ -427,6 +421,18 @@ class AsyncBigServer : public Server {
 
 static size_t writeAsyncBigCB(char *s, size_t size, size_t n, void *) {
    return size*n;
+}
+
+static size_t readAsyncBigCB(char *s, size_t size, size_t n, void *data) {
+   static std::default_random_engine rd;
+   size_t& nReadBytes = *static_cast<size_t*>(data);
+   if (nReadBytes == 0)
+      return 0;
+   
+   std::uniform_int_distribution<size_t> d(1, std::min(nReadBytes, size*n));
+   size_t nTransfer = d(rd);
+   nReadBytes -= nTransfer;
+   return nTransfer;
 }
 
 BOOST_AUTO_TEST_CASE(AsyncBig) {
@@ -445,10 +451,10 @@ BOOST_AUTO_TEST_CASE(AsyncBig) {
       headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-      std::istringstream is(upData);
-      curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
-      curl_easy_setopt(curl, CURLOPT_READDATA, &is);
-      curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
+      auto nReadBytes = std::make_shared<size_t>(1 << 20);
+      curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readAsyncBigCB);
+      curl_easy_setopt(curl, CURLOPT_READDATA, nReadBytes.get());
+      curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(*nReadBytes));
 
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeAsyncBigCB);
 

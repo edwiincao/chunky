@@ -569,6 +569,8 @@ namespace chunky {
       Headers& response_trailers() { return responseTrailers_; }
       
    private:
+      enum { MaxDiscardBufferSize = 65536 };
+      
       std::shared_ptr<T> stream_;
       boost::asio::streambuf streambuf_;
       
@@ -622,17 +624,19 @@ namespace chunky {
       // Asynchronously discard any unread body.
       void async_discard(const Handler& handler) {
          if (requestBytes_) {
+            auto bufferSize = std::min(requestBytes_, static_cast<size_t>(MaxDiscardBufferSize));
+            auto buffer = std::make_shared<std::vector<char> >(bufferSize);
             boost::asio::async_read(
-               *this, streambuf_,
+               *this, boost::asio::buffer(*buffer),
                boost::asio::transfer_exactly(requestBytes_),
-               [=](const error_code& error, size_t nBytes) {
+               [=](const error_code& error, size_t) {
                   if (error) {
                      handler(error);
                      return;
                   }
 
-                  streambuf_.consume(nBytes);
                   async_discard(handler);
+                  buffer.get();
                });
          }
          else
@@ -643,8 +647,10 @@ namespace chunky {
       void sync_discard(const Handler& handler) {
          while (requestBytes_) {
             error_code error;
-            size_t nBytes = boost::asio::read(
-               *this, streambuf_,
+            auto bufferSize = std::min(requestBytes_, static_cast<size_t>(MaxDiscardBufferSize));
+            auto buffer = std::make_shared<std::vector<char> >(bufferSize);
+            boost::asio::read(
+               *this, boost::asio::buffer(*buffer),
                boost::asio::transfer_exactly(requestBytes_),
                error);
             if (error) {
@@ -652,7 +658,7 @@ namespace chunky {
                return;
             }
 
-            streambuf_.consume(nBytes);
+            buffer.get();
          }
 
          handler(error_code());
