@@ -20,6 +20,7 @@ limitations under the License.
 #include <deque>
 #include <memory>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <boost/algorithm/string/predicate.hpp>
@@ -44,7 +45,8 @@ namespace chunky {
       invalid_request_header,
       unsupported_http_version,
       invalid_content_length,
-      invalid_chunk_length
+      invalid_chunk_length,
+      invalid_chunk_delimiter
    };
    
    inline boost::system::error_code make_error_code(errors e) {
@@ -67,6 +69,8 @@ namespace chunky {
                return "Invalid Content-Length";
             case invalid_chunk_length:
                return "Invalid chunk length";
+            case invalid_chunk_delimiter:
+               return "Invalid chunk delimiter";
             default:
                return "chunky error";
             }
@@ -261,7 +265,7 @@ namespace chunky {
          using namespace std::placeholders;
          std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
          http->create(
-            std::bind(&HTTPTemplate::load_buffer, http, _1, _2),
+            std::bind(&HTTPTemplate::sync_load_buffer, http, _1, _2),
             [=](const error_code& error) {
                if (error)
                   throw boost::system::system_error(error);
@@ -270,6 +274,7 @@ namespace chunky {
          return http;
       }
 
+      // TODO: make private
       typedef std::function<void(const std::string&, const Handler&)> LoadBufferFunc;
       void create(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
          read_request_line(loadBufferFunc, [=](const error_code& error) {
@@ -319,14 +324,23 @@ namespace chunky {
 
                // Read the chunk delimiter and next chunk header if chunked.
                if (bufferSize && requestChunksPending_ && !requestBytes_) {
-                  async_get_line([=](const boost::system::error_code& error, const std::string& s) mutable {
-                        assert(s.empty());
+                  using namespace std::placeholders;
+                  auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
+                  loadBufferFunc(crlf(), [=](const error_code& error) mutable {
                         if (error) {
                            handler(error, nBytesRead);
                            return;
                         }
                         
-                        read_chunk_header([=](const boost::system::error_code& error) mutable {
+                        std::string s = get_line();
+                        if (!s.empty()) {
+                           handler(make_error_code(invalid_chunk_delimiter), nBytesRead);
+                           return;
+                        }
+                        
+                        read_chunk_header(
+                           loadBufferFunc,
+                           [=](const error_code& error) mutable {
                               handler(error, nBytesRead);
                            });
                      });
@@ -704,27 +718,48 @@ namespace chunky {
                   return;
                }
                   
-               const std::string s = get_line();
-
-               try {
-                  // Chunk header begins with a hexadecimal chunk length.
-                  requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
-               }
-               catch (const boost::system::error_code& error) {
-                  // std::stoul() threw on the chunk header.
-                  handler(error);
+               // Chunk header begins with a hexadecimal chunk length.
+               std::istringstream is(get_line());
+               is >> std::hex >> requestBytes_;
+               if (!is) {
+                  handler(make_error_code(invalid_chunk_length));
                   return;
                }
-
+               
                if (!requestBytes_) {
                   requestChunksPending_ = false;
-                  read_request_headers(loadBufferFunc, handler);
+                  read_request_trailers(loadBufferFunc, handler);
                }
                else
                   handler(error);
             });
       }
 
+      void read_request_trailers(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         loadBufferFunc(crlf(), [=](const error_code& error) {
+               if (error) {
+                  handler(error);
+                  return;
+               }
+               
+               std::string s = get_line();
+               if (!s.empty()) {
+                  const auto colon = s.find_first_of(':');
+                  if (colon == std::string::npos) {
+                     handler(make_error_code(invalid_request_header));
+                     return;
+                  }
+
+                  std::string key = "/" + s.substr(0, colon);
+                  std::string value = s.substr(colon + 1);
+                  boost::algorithm::trim_left(value);
+                  requestHeaders_.insert({{std::move(key), std::move(value)}});
+               }
+               else
+                  handler(error);
+            });
+      }
+      
       void read_request_line(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, std::string&& s) {
