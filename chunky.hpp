@@ -566,6 +566,7 @@ namespace chunky {
 
       unsigned int& response_status() { return responseStatus_; }
       Headers& response_headers() { return responseHeaders_; }
+      Headers& response_trailers() { return responseTrailers_; }
       
    private:
       std::shared_ptr<T> stream_;
@@ -581,6 +582,7 @@ namespace chunky {
       
       unsigned int responseStatus_;
       Headers responseHeaders_;
+      Headers responseTrailers_;
 
       size_t responseBytes_;
       bool responseChunked_;
@@ -598,6 +600,9 @@ namespace chunky {
          return s;
       }
 
+      // Asynchronously guarantee that the body buffer contains the
+      // delimiter. This allows subsequent synchronous read_until()
+      // calls to succeed without blocking.
       void async_load_buffer(const std::string& delimiter, const Handler& handler) {
          boost::asio::async_read_until(
             *stream(), streambuf_, delimiter,
@@ -605,13 +610,16 @@ namespace chunky {
                handler(error);
             });
       }
-      
+
+      // Synchronously guarantee that the body buffer contains the
+      // delimiter.
       void sync_load_buffer(const std::string& delimiter, const Handler& handler) {
          error_code error;
          boost::asio::read_until(*stream(), streambuf_, delimiter, error);
          handler(error);
       }
 
+      // Asynchronously discard any unread body.
       void async_discard(const Handler& handler) {
          if (requestBytes_) {
             boost::asio::async_read(
@@ -631,6 +639,7 @@ namespace chunky {
             handler(error_code());
       }
 
+      // Synchronously discard any unread body.
       void sync_discard(const Handler& handler) {
          while (requestBytes_) {
             error_code error;
@@ -648,16 +657,19 @@ namespace chunky {
 
          handler(error_code());
       }
-      
+
+      // Get the next line (through CRLF) from the underlying stream.
+      // The read is via the streambuf so it should not block if
+      // the buffer has previously been loaded.
       std::string get_line() {
          auto nBytes = boost::asio::read_until(*stream(), streambuf_, crlf());
-
          auto i = boost::asio::buffers_begin(streambuf_.data());
          std::string s(i, i + nBytes - crlf().size());
          streambuf_.consume(nBytes);
          return s;
       }
 
+      // Common synchronous/asynchronous create() helper.
       typedef std::function<void(const std::string&, const Handler&)> LoadBufferFunc;
       void create(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
          read_request_line(loadBufferFunc, [=](const error_code& error) {
@@ -760,7 +772,6 @@ namespace chunky {
             handler(error_code());
       }
 
-      // This helper reads a chunk length header.
       void read_chunk_header(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
          assert(requestBytes_ == 0);
          assert(requestChunksPending_);
@@ -819,6 +830,8 @@ namespace chunky {
 
       std::string prepare_write_prefix(size_t nBytes) {
          std::string s;
+         // The prefix includes the status line and headers if this is
+         // the first write.
          boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
          if (responseBytes_ == 0) {
             // Set Date header if not already present.
@@ -844,11 +857,7 @@ namespace chunky {
             }
 
             write_status(os);
-            write_headers(os, [](const std::string& s) -> std::string {
-                  if (!s.empty() && s[0] != '/')
-                     return s;
-                  return std::string();
-               });
+            write_headers(os, response_headers());
          }
 
          if (responseChunked_)
@@ -865,11 +874,7 @@ namespace chunky {
             if (nBytes)
                os << crlf();
             else
-               write_headers(os, [](const std::string& s) -> std::string {
-                     if (!s.empty() && s[0] == '/')
-                        return s.substr(1);
-                     return std::string();
-                  });
+               write_headers(os, response_trailers());
          }
 
          return os.str();
@@ -926,15 +931,11 @@ namespace chunky {
             % (reason != reasons.end() ? reason->second : std::string());
       }
 
-      template<typename Filter>
-      void write_headers(std::ostream& os, Filter filter) {
-         for (const auto& value : response_headers()) {
-            const auto key = filter(value.first);
-            if (!key.empty()) {
-               os << boost::format("%s: %s\r\n")
-                  % key
-                  % value.second;
-            }
+      void write_headers(std::ostream& os, const Headers& headers) {
+         for (const auto& value : headers) {
+            os << boost::format("%s: %s\r\n")
+               % value.first
+               % value.second;
          }
          os << crlf();
       }
