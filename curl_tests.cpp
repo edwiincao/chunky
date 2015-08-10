@@ -384,7 +384,7 @@ class AsyncBigServer : public Server {
                   return;
                }
 
-               LOG(info) << boost::format("%d written") % nBytes;
+               // LOG(info) << boost::format("%d written") % nBytes;
                write(http, bytesRemaining - nBytes, handler);
             });
                
@@ -402,7 +402,7 @@ class AsyncBigServer : public Server {
 
       // Don't read; let finish() drain the input stream.
       
-      write(http, 1 << 20, [=](const error_code& error) {
+      write(http, 1 << 10, [=](const error_code& error) {
             if (error) {
                LOG(error) << error.message();
                return;
@@ -441,7 +441,7 @@ BOOST_AUTO_TEST_CASE(AsyncBig) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   for (int i = 0; i < 2; ++i) {
+   for (int i = 0; i < 8; ++i) {
       curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
    
       auto url = (boost::format("http://localhost:%d/AsyncBig") % server.port()).str();
