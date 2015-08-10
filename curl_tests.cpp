@@ -4,6 +4,7 @@
 
 #include <future>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <thread>
 #include <boost/log/trivial.hpp>
@@ -312,13 +313,13 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
                   [=](const error_code& error, size_t nBytes) {
                      BOOST_CHECK_EQUAL(nBytes, dnData.size());
                      if (error) {
-                        LOG(error) << "async_write handler " << error.message();
+                        LOG(error) << error.message();
                         return;
                      }
 
                      http->async_finish([=](const error_code& error) {
                            if (error) {
-                              LOG(error) << "async_finish handler\n" << error.message();
+                              LOG(error) << error.message();
                               return;
                            }
                            serve(http->stream());
@@ -353,6 +354,106 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
       auto status = curl_easy_perform(curl);
       BOOST_CHECK_EQUAL(status, CURLE_OK);
       BOOST_CHECK_EQUAL(os.str(), dnData);
+
+      curl_slist_free_all(headers);
+   }
+   
+   curl_easy_cleanup(curl);
+}
+
+class AsyncBigServer : public Server {
+   std::default_random_engine rd_;
+   std::vector<char> data_;
+      
+   template<typename WriteHandler>
+   void write(
+      const std::shared_ptr<HTTP>& http,
+      size_t bytesRemaining,
+      WriteHandler&& handler) {
+      if (bytesRemaining) {
+         // Choose some number.
+         std::uniform_int_distribution<size_t> d(1, bytesRemaining);
+         size_t n = d(rd_);
+         data_.resize(n);
+         
+         boost::asio::async_write(
+            *http, boost::asio::buffer(data_),
+            [=](const boost::system::error_code& error, size_t nBytes) {
+               if (error) {
+                  handler(error);
+                  return;
+               }
+
+               LOG(info) << boost::format("%d written") % nBytes;
+               write(http, bytesRemaining - nBytes, handler);
+            });
+               
+      }
+      else
+         handler(boost::system::error_code());
+   }
+      
+   void serveHandler(const std::shared_ptr<HTTP>& http) {
+      BOOST_CHECK_EQUAL(http->request_method(), "PUT");
+      BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncBig");
+
+      auto body = std::make_shared<boost::asio::streambuf>();
+      boost::asio::async_read(
+         *http, *body,
+         [=](const error_code& error, size_t nBytes) {
+            std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
+            BOOST_CHECK_EQUAL(s, upData);
+               
+            http->response_status() = 200;
+            http->response_headers()["Content-Type"] = "text/plain";
+
+            write(http, 65536, [=](const error_code& error) {
+                  if (error) {
+                     LOG(error) << error.message();
+                     return;
+                  }
+
+                  http->async_finish([=](const error_code& error) {
+                        if (error) {
+                           LOG(error) << error.message();
+                           return;
+                        }
+                        serve(http->stream());
+                     });
+               });
+         });
+   }
+};
+
+static size_t writeAsyncBigCB(char *s, size_t size, size_t n, void *) {
+   return size*n;
+}
+
+BOOST_AUTO_TEST_CASE(AsyncBig) {
+   AsyncBigServer server;
+   
+   CURL *curl = curl_easy_init();
+   BOOST_REQUIRE(curl);
+
+   for (int i = 0; i < 2; ++i) {
+      curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+   
+      auto url = (boost::format("http://localhost:%d/AsyncBig") % server.port()).str();
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+
+      curl_slist* headers = curl_slist_append(nullptr, "Expect:");
+      headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+      std::istringstream is(upData);
+      curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
+      curl_easy_setopt(curl, CURLOPT_READDATA, &is);
+      curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<long>(upData.size()));
+
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &writeAsyncBigCB);
+
+      auto status = curl_easy_perform(curl);
+      BOOST_CHECK_EQUAL(status, CURLE_OK);
 
       curl_slist_free_all(headers);
    }
