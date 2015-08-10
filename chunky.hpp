@@ -312,20 +312,20 @@ namespace chunky {
             nBytesRead += nBytes;
          }
 
+         using namespace std::placeholders;
+         auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
          boost::asio::async_read(
             *stream(), buffers, boost::asio::transfer_exactly(nBytesRead ? 0 : requestBytes_),
             [=](const boost::system::error_code& error, size_t nBytes) mutable {
-               requestBytes_ -= nBytes;
-               nBytesRead += nBytes;
                if (error) {
                   handler(error, nBytesRead);
                   return;
                }
 
                // Read the chunk delimiter and next chunk header if chunked.
+               requestBytes_ -= nBytes;
+               nBytesRead += nBytes;
                if (bufferSize && requestChunksPending_ && !requestBytes_) {
-                  using namespace std::placeholders;
-                  auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
                   loadBufferFunc(crlf(), [=](const error_code& error) mutable {
                         if (error) {
                            handler(error, nBytesRead);
@@ -355,41 +355,84 @@ namespace chunky {
       }
 
       template<typename MutableBufferSequence>
-      size_t read_some(MutableBufferSequence&& buffers) {
-         const auto bufferSize = boost::asio::buffer_size(buffers);
-         auto nBytes = std::min(requestBytes_, bufferSize);
-         if (nBytes == 0 && bufferSize > 0)
-            throw boost::system::system_error(boost::asio::error::make_error_code(boost::asio::error::eof));
+      size_t read_some(MutableBufferSequence&& buffers, boost::system::error_code& error) {
+         size_t result;
+         auto handler = [&](const error_code& e, size_t n) {
+            error = e;
+            result = n;
+         };
          
          // Take data from the streambuf first.
+         size_t nBytesRead = 0;
+         const auto bufferSize = boost::asio::buffer_size(buffers);
          if (streambuf_.size()) {
-            nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), nBytes);
+            auto nBytes = boost::asio::buffer_copy(buffers, streambuf_.data(), requestBytes_);
             streambuf_.consume(nBytes);
-         }
-         else
-            nBytes = boost::asio::read(*stream(), buffers, boost::asio::transfer_exactly(nBytes));
-         
-         // Read the chunk delimiter and next chunk header if chunked.
-         requestBytes_ -= nBytes;
-         if (bufferSize && requestChunksPending_ && !requestBytes_) {
-            get_line();
-            read_chunk_header();
+            requestBytes_ -= nBytes;
+            nBytesRead += nBytes;
          }
 
+         // Jump through some hoops to make the inner lambda exactly
+         // the same as async_read_some().
+         using namespace std::placeholders;
+         auto loadBufferFunc = std::bind(&HTTPTemplate::sync_load_buffer, this, _1, _2);
+         size_t nBytes = boost::asio::read(
+            *stream(),
+            buffers,
+            boost::asio::transfer_exactly(nBytesRead ? 0 : requestBytes_),
+            error);
+         [=](const std::function<void(const error_code&, size_t)>& f) {
+            f(error, nBytes);
+         }([=](const error_code& error, size_t nBytes) mutable {
+               if (error) {
+                  handler(error, nBytesRead);
+                  return;
+               }
+
+               // Read the chunk delimiter and next chunk header if chunked.
+               requestBytes_ -= nBytes;
+               nBytesRead += nBytes;
+               if (bufferSize && requestChunksPending_ && !requestBytes_) {
+                  using namespace std::placeholders;
+                  loadBufferFunc(crlf(), [=](const error_code& error) mutable {
+                        if (error) {
+                           handler(error, nBytesRead);
+                           return;
+                        }
+                        
+                        std::string s = get_line();
+                        if (!s.empty()) {
+                           handler(make_error_code(invalid_chunk_delimiter), nBytesRead);
+                           return;
+                        }
+                        
+                        read_chunk_header(
+                           loadBufferFunc,
+                           [=](const error_code& error) mutable {
+                              handler(error, nBytesRead);
+                           });
+                     });
+               }
+               else {
+                  boost::system::error_code error;
+                  if (nBytesRead == 0 && bufferSize > 0)
+                     error = boost::asio::error::make_error_code(boost::asio::error::eof);
+                  handler(error, nBytesRead);
+               }
+            });
+
+         return result;
+      }
+
+      template<typename MutableBufferSequence>
+      size_t read_some(MutableBufferSequence&& buffers) {
+         error_code error;
+         size_t nBytes = read_some(buffers, error);
+         if (error)
+            throw boost::system::system_error(error);
          return nBytes;
       }
       
-      template<typename MutableBufferSequence>
-      size_t read_some(MutableBufferSequence&& buffers, boost::system::error_code& error) {
-         try {
-            return read_some(buffers);
-         }
-         catch (const boost::system::system_error& e) {
-            error = e.code();
-            return 0;
-         }
-      }
-
       template<typename ConstBufferSequence, typename WriteHandler>
       void async_write_some(ConstBufferSequence&& buffers, WriteHandler&& handler) {
          // Write status, headers, and chunk prefix if necessary.
@@ -610,23 +653,6 @@ namespace chunky {
          return s;
       }
 
-      
-      template<typename Handler>
-      void async_get_line(Handler&& handler) {
-          boost::asio::async_read_until(
-             *stream(), streambuf_, crlf(),
-             [this, handler](const boost::system::error_code& error, size_t nBytes) mutable {
-                if (!error) {
-                   auto i = boost::asio::buffers_begin(streambuf_.data());
-                   std::string s(i, i + (nBytes - crlf().size()));
-                   streambuf_.consume(nBytes);
-                   handler(error, std::move(s));
-                }
-                else
-                   handler(error, std::string());
-             });
-      }
-      
       void read_request_line(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
          loadBufferFunc(crlf(), [=](const error_code& error) {
                if (error) {
@@ -758,151 +784,6 @@ namespace chunky {
                else
                   handler(error);
             });
-      }
-      
-      void read_request_line(const Handler& handler = Handler()) {
-         if (handler) {
-            async_get_line([this, handler](boost::system::error_code error, std::string&& s) {
-                  if (!error)
-                     error = process_request_line(s);
-                  handler(error);
-               });
-         }
-         else {
-            const std::string s = get_line();
-            if (boost::system::error_code error = process_request_line(s))
-               throw boost::system::system_error(error);
-         }
-      }
-
-      // This helper parses an HTTP 1.1 request line.
-      boost::system::error_code process_request_line(const std::string& s) {
-         std::smatch requestMatch;
-         static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
-         if (std::regex_match(s, requestMatch, requestRegex)) {
-            requestMethod_   = requestMatch[1];
-            requestResource_ = requestMatch[2];
-            requestVersion_  = requestMatch[3];
-
-            if (requestVersion_ != "HTTP/1.1")
-               return make_error_code(unsupported_http_version);
-         }
-         else
-            return make_error_code(invalid_request_line);
-
-         return boost::system::error_code();
-      }
-
-      // This helper reads headers from the stream.
-      void read_request_headers(const Handler& handler = Handler()) {
-         if (handler) {
-            async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
-                  if (!s.empty() && !(error = process_request_header(s)))
-                     read_request_headers(handler);
-                  else
-                     handler(error);
-               });
-         }
-         else {
-            for (auto s = get_line(); !s.empty(); s = get_line()) {
-               if (auto error = process_request_header(s))
-                  throw boost::system::system_error(error);
-            }
-         }
-      }
-
-      // This helper parses a header.
-      boost::system::error_code process_request_header(const std::string& s) {
-         const auto colon = s.find_first_of(':');
-         if (colon == std::string::npos)
-            return make_error_code(invalid_request_header);
-
-         std::string key = s.substr(0, colon);
-         std::string value = s.substr(colon + 1);
-         boost::algorithm::trim_left(value);
-
-         // Coalesce values with the same key.
-         const auto i = requestHeaders_.find(key);
-         if (i != requestHeaders_.end()) {
-            i->second += ", ";
-            i->second += value;
-         }
-         else
-            requestHeaders_.insert({{std::move(key), std::move(value)}});
-
-         return boost::system::error_code();
-      }
-
-      // This helper sets requestBytes_, which is the number of request
-      // body bytes available to be read. It handles both Content-Length
-      // and Transfer-Encoding (chunked).
-      void read_length(const Handler& handler = Handler()) {
-         try {
-            auto contentLength = requestHeaders_.find("content-length");
-            if (contentLength != requestHeaders_.end())
-               requestBytes_ = static_cast<size_t>(std::stoul(contentLength->second));
-         }
-         catch (...) {
-            // std::stoul() threw on the Content-Length header.
-            auto error = make_error_code(invalid_content_length);
-            if (handler) {
-               handler(error);
-               return;
-            }
-            throw boost::system::system_error(error);
-         }
-
-         auto transferEncoding = requestHeaders_.find("transfer-encoding");
-         if (transferEncoding != requestHeaders_.end() &&
-             transferEncoding->second != "identity") {
-            requestBytes_ = 0U;
-            requestChunksPending_ = true;
-            read_chunk_header(handler);
-         }
-         else if (handler)
-            handler(boost::system::error_code());
-      }
-
-      // This helper reads a chunk length header.
-      void read_chunk_header(const Handler& handler = Handler()) {
-         assert(requestBytes_ == 0);
-         assert(requestChunksPending_);
-         if (handler) {
-            async_get_line([this, handler](boost::system::error_code error, const std::string& s) {
-                  if (error) {
-                     handler(error);
-                     return;
-                  }
-
-                  try {
-                     process_chunk_header(s);
-                  }
-                  catch (...) {
-                     // std::stoul() threw on the chunk header.
-                     handler(make_error_code(invalid_chunk_length));
-                     return;
-                  }
-
-                  if (!requestChunksPending_)
-                     read_request_headers(handler);
-                  else
-                     handler(error);
-               });
-         }
-         else {
-            const std::string s = get_line();
-            process_chunk_header(s);
-            if (!requestChunksPending_)
-               read_request_headers();
-         }
-      }
-      
-      // This helper parses a chunk length header.
-      void process_chunk_header(const std::string& s) {
-         // Chunk header begins with a hexadecimal chunk length.
-         requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
-         if (!requestBytes_)
-            requestChunksPending_ = false;
       }
 
       // This helper ensures that the entire request has been consumed
