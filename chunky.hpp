@@ -243,25 +243,49 @@ namespace chunky {
    public:
       typedef std::map<std::string, std::string, detail::CaselessCompare> Headers;
 
-      template<typename CreateHandler>
-      static void async_create(
-         const std::shared_ptr<T>& stream,
-         CreateHandler&& handler) {
+      typedef boost::system::error_code error_code;
+      typedef std::function<void(const boost::system::error_code&)> Handler;
+      typedef std::function<void(const error_code&, const std::shared_ptr<HTTPTemplate>&)> CreateHandler;
+      
+      static void async_create(const std::shared_ptr<T>& stream, const CreateHandler& handler) {
+         using namespace std::placeholders;
          std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
-         http->read_request_line([=](const boost::system::error_code& error) {
+         http->create(
+            std::bind(&HTTPTemplate::async_load_buffer, http, _1, _2),
+            [=](const error_code& error) {
+               handler(error, http);
+            });
+      }
+
+      static std::shared_ptr<HTTPTemplate> create(const std::shared_ptr<T>& stream) {
+         using namespace std::placeholders;
+         std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
+         http->create(
+            std::bind(&HTTPTemplate::load_buffer, http, _1, _2),
+            [=](const error_code& error) {
+               if (error)
+                  throw boost::system::system_error(error);
+            });
+
+         return http;
+      }
+
+      typedef std::function<void(const std::string&, const Handler&)> LoadBufferFunc;
+      void create(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         read_request_line(loadBufferFunc, [=](const error_code& error) {
                if (error) {
-                  handler(error, http);
+                  handler(error);
                   return;
                }
 
-               http->read_request_headers([=](const boost::system::error_code& error) {
+               read_request_headers(loadBufferFunc, [=](const error_code& error) {
                      if (error) {
-                        handler(error, http);
+                        handler(error);
                         return;
                      }
 
-                     http->read_length([=](const boost::system::error_code& error) {
-                           handler(error, http);
+                     read_length(loadBufferFunc, [=](const error_code& error) {
+                           handler(error);
                         });
                   });
             });
@@ -548,26 +572,23 @@ namespace chunky {
          static const std::string s("\r\n");
          return s;
       }
-      
-      template<typename Handler>
-      void async_get_line(Handler&& handler) {
+
+      void async_load_buffer(const std::string& delimiter, const Handler& handler) {
          boost::asio::async_read_until(
-            *stream(), streambuf_, crlf(),
-            [this, handler](const boost::system::error_code& error, size_t nBytes) mutable {
-               if (!error) {
-                  auto i = boost::asio::buffers_begin(streambuf_.data());
-                  std::string s(i, i + (nBytes - crlf().size()));
-                  streambuf_.consume(nBytes);
-                  handler(error, std::move(s));
-               }
-               else
-                  handler(error, std::string());
+            *stream(), streambuf_, delimiter,
+            [=](const error_code& error, size_t) {
+               handler(error);
             });
+      }
+      
+      void sync_load_buffer(const std::string& delimiter, const Handler& handler) {
+         boost::system::error_code error;
+         boost::asio::read_until(*stream(), streambuf_, delimiter, error);
+         handler(error);
       }
 
       std::string get_line() {
-         auto nBytes = boost::asio::read_until(
-            *stream(), streambuf_, crlf());
+         auto nBytes = boost::asio::read_until(*stream(), streambuf_, crlf());
 
          auto i = boost::asio::buffers_begin(streambuf_.data());
          std::string s(i, i + nBytes - crlf().size());
@@ -575,12 +596,135 @@ namespace chunky {
          return s;
       }
 
-      // Several helper functions below take a std::function callback.
-      // The callback may be empty for synchronous use (throwing an
-      // exception on an error); otherwise the callback is invoked
-      // asynchronously with the status.
-      typedef std::function<void(const boost::system::error_code&)> Handler;
       
+      template<typename Handler>
+      void async_get_line(Handler&& handler) {
+          boost::asio::async_read_until(
+             *stream(), streambuf_, crlf(),
+             [this, handler](const boost::system::error_code& error, size_t nBytes) mutable {
+                if (!error) {
+                   auto i = boost::asio::buffers_begin(streambuf_.data());
+                   std::string s(i, i + (nBytes - crlf().size()));
+                   streambuf_.consume(nBytes);
+                   handler(error, std::move(s));
+                }
+                else
+                   handler(error, std::string());
+             });
+      }
+      
+      void read_request_line(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         loadBufferFunc(crlf(), [=](const error_code& error) {
+               if (error) {
+                  handler(error);
+                  return;
+               }
+
+               auto s = get_line();
+               
+               std::smatch requestMatch;
+               static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
+               if (std::regex_match(s, requestMatch, requestRegex)) {
+                  requestMethod_   = requestMatch[1];
+                  requestResource_ = requestMatch[2];
+                  requestVersion_  = requestMatch[3];
+
+                  if (requestVersion_ == "HTTP/1.1")
+                     handler(error_code());
+                  else
+                     handler(make_error_code(unsupported_http_version));
+               }
+               else
+                  handler(make_error_code(invalid_request_line));
+            });
+      }
+
+      void read_request_headers(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         static const std::string crlf2 = "\r\n\r\n";
+         loadBufferFunc(crlf2, [=](const error_code& error) {
+               if (error) {
+                  handler(error);
+                  return;
+               }
+               
+               for (auto s = get_line(); !s.empty(); s = get_line()) {
+                  const auto colon = s.find_first_of(':');
+                  if (colon == std::string::npos) {
+                     handler(make_error_code(invalid_request_header));
+                     return;
+                  }
+
+                  std::string key = s.substr(0, colon);
+                  std::string value = s.substr(colon + 1);
+                  boost::algorithm::trim_left(value);
+
+                  // Coalesce values with the same key.
+                  const auto i = requestHeaders_.find(key);
+                  if (i != requestHeaders_.end()) {
+                     i->second += ", ";
+                     i->second += value;
+                  }
+                  else
+                     requestHeaders_.insert({{std::move(key), std::move(value)}});
+               }
+
+               handler(error_code());
+            });
+      }
+      
+      void read_length(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         try {
+            auto contentLength = requestHeaders_.find("content-length");
+            if (contentLength != requestHeaders_.end())
+               requestBytes_ = static_cast<size_t>(std::stoul(contentLength->second));
+         }
+         catch (...) {
+            // std::stoul() threw on the Content-Length header.
+            handler(make_error_code(invalid_content_length));
+         }
+
+         auto transferEncoding = requestHeaders_.find("transfer-encoding");
+         if (transferEncoding != requestHeaders_.end() &&
+             transferEncoding->second != "identity") {
+            requestBytes_ = 0U;
+            requestChunksPending_ = true;
+            read_chunk_header(loadBufferFunc, handler);
+         }
+         else
+            handler(boost::system::error_code());
+      }
+
+      // This helper reads a chunk length header.
+      void read_chunk_header(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
+         assert(requestBytes_ == 0);
+         assert(requestChunksPending_);
+         loadBufferFunc(crlf(), [=](const error_code& error) {
+               if (error) {
+                  handler(error);
+                  return;
+               }
+                  
+               const std::string s = get_line();
+
+               try {
+                  // Chunk header begins with a hexadecimal chunk length.
+                  requestBytes_ = static_cast<size_t>(std::stoul(s, nullptr, 16));
+               }
+               catch (const boost::system::error_code& error) {
+                  // std::stoul() threw on the chunk header.
+                  handler(error);
+                  return;
+               }
+
+               if (!requestBytes_) {
+                  requestChunksPending_ = false;
+                  read_request_headers(loadBufferFunc, handler);
+               }
+               else
+                  handler(error);
+            });
+      }
+
       void read_request_line(const Handler& handler = Handler()) {
          if (handler) {
             async_get_line([this, handler](boost::system::error_code error, std::string&& s) {
@@ -717,7 +861,7 @@ namespace chunky {
                read_request_headers();
          }
       }
-
+      
       // This helper parses a chunk length header.
       void process_chunk_header(const std::string& s) {
          // Chunk header begins with a hexadecimal chunk length.
