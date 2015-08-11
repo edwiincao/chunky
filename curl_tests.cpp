@@ -117,6 +117,8 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/ContentLength");
 
+         http->continue_request();
+         
          boost::asio::streambuf body;
          boost::system::error_code error;
          boost::asio::read(*http, body, error);
@@ -145,9 +147,6 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
       auto url = (boost::format("http://localhost:%d/ContentLength") % server.port()).str();
       curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
-      curl_slist* headers = curl_slist_append(nullptr, "Expect:");
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
       std::istringstream is(upData);
       curl_easy_setopt(curl, CURLOPT_READFUNCTION, &readCB);
       curl_easy_setopt(curl, CURLOPT_READDATA, &is);
@@ -161,7 +160,7 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
       BOOST_CHECK_EQUAL(status, CURLE_OK);
       BOOST_CHECK_EQUAL(os.str(), dnData);
 
-      curl_slist_free_all(headers);
+      // curl_slist_free_all(headers);
    }
    
    curl_easy_cleanup(curl);

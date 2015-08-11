@@ -359,6 +359,39 @@ namespace chunky {
          }
       }
 
+      void continue_request(const Handler& handler = Handler()) {
+         assert(responseBytes_ == 0);
+         auto expect = request_headers().find("Expect");
+         if (expect == request_headers().end() ||
+             expect->second.find("100-continue") == std::string::npos) {
+            if (handler)
+               handler(error_code());
+            return;
+         }
+
+         static const std::string continue100("HTTP/1.1 100 Continue\r\n\r\n");
+         if (handler) {
+            boost::asio::async_write(
+               *stream(), boost::asio::buffer(continue100),
+               [=](const error_code& error, size_t) {
+                  handler(error);
+               });
+         }
+         else {
+            boost::asio::write(
+               *stream(), boost::asio::buffer(continue100));
+         }
+      }
+
+      void continue_request(error_code& error) {
+         try {
+            continue_request();
+         }
+         catch (const boost::system::system_error& e) {
+            error = e.code();
+         }
+      }
+      
       boost::asio::io_service& get_io_service() {
          return stream()->get_io_service();
       }
