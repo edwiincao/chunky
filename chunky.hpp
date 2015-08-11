@@ -602,6 +602,11 @@ namespace chunky {
          return s;
       }
 
+      static const std::string& crlf2() {
+         static const std::string s("\r\n\r\n");
+         return s;
+      }
+
       // Asynchronously guarantee that the body buffer contains the
       // delimiter. This allows subsequent synchronous read_until()
       // calls to succeed without blocking.
@@ -678,95 +683,85 @@ namespace chunky {
       // Common synchronous/asynchronous create() helper.
       typedef std::function<void(const std::string&, const Handler&)> LoadBufferFunc;
       void create(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
-         read_request_line(loadBufferFunc, [=](const error_code& error) {
+         loadBufferFunc(crlf2(), [=](const error_code& error) {
                if (error) {
                   handler(error);
                   return;
                }
-
-               read_request_headers(loadBufferFunc, [=](const error_code& error) {
-                     if (error) {
-                        handler(error);
-                        return;
-                     }
-
-                     read_length(loadBufferFunc, [=](const error_code& error) {
-                           handler(error);
-                        });
+               
+               if (error_code error = read_request_line()) {
+                  handler(error);
+                  return;
+               }
+                  
+               if (error_code error = read_request_headers()) {
+                  handler(error);
+                  return;
+               }
+               
+               read_length(loadBufferFunc, [=](const error_code& error) {
+                     handler(error);
                   });
             });
       }
 
-      void read_request_line(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
-         loadBufferFunc(crlf(), [=](const error_code& error) {
-               if (error) {
-                  handler(error);
-                  return;
-               }
-
-               auto s = get_line();
+      error_code read_request_line() {
+         auto s = get_line();
                
-               std::smatch requestMatch;
-               static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
-               if (std::regex_match(s, requestMatch, requestRegex)) {
-                  requestMethod_   = requestMatch[1];
-                  requestResource_ = requestMatch[2];
-                  requestVersion_  = requestMatch[3];
+         std::smatch requestMatch;
+         static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
+         if (std::regex_match(s, requestMatch, requestRegex)) {
+            requestMethod_   = requestMatch[1];
+            requestResource_ = requestMatch[2];
+            requestVersion_  = requestMatch[3];
 
-                  if (requestVersion_ == "HTTP/1.1")
-                     handler(error_code());
-                  else
-                     handler(make_error_code(unsupported_http_version));
-               }
-               else
-                  handler(make_error_code(invalid_request_line));
-            });
+            if (requestVersion_ == "HTTP/1.1")
+               return error_code();
+            else
+               return make_error_code(unsupported_http_version);
+         }
+         else
+            return make_error_code(invalid_request_line);
       }
 
-      void read_request_headers(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
-         static const std::string crlf2 = "\r\n\r\n";
-         loadBufferFunc(crlf2, [=](const error_code& error) {
-               if (error) {
-                  handler(error);
-                  return;
-               }
-               
-               for (auto s = get_line(); !s.empty(); s = get_line()) {
-                  const auto colon = s.find_first_of(':');
-                  if (colon == std::string::npos) {
-                     handler(make_error_code(invalid_request_header));
-                     return;
-                  }
+      error_code read_request_headers() {
+         for (auto s = get_line(); !s.empty(); s = get_line()) {
+            const auto colon = s.find_first_of(':');
+            if (colon == std::string::npos) {
+               return make_error_code(invalid_request_header);
+            }
 
-                  std::string key = s.substr(0, colon);
-                  std::string value = s.substr(colon + 1);
-                  boost::algorithm::trim_left(value);
+            std::string key = s.substr(0, colon);
+            std::string value = s.substr(colon + 1);
+            boost::algorithm::trim_left(value);
 
-                  // Coalesce values with the same key.
-                  const auto i = requestHeaders_.find(key);
-                  if (i != requestHeaders_.end()) {
-                     i->second += ", ";
-                     i->second += value;
-                  }
-                  else
-                     requestHeaders_.insert({{std::move(key), std::move(value)}});
-               }
+            // Coalesce values with the same key.
+            const auto i = requestHeaders_.find(key);
+            if (i != requestHeaders_.end()) {
+               i->second += ", ";
+               i->second += value;
+            }
+            else
+               requestHeaders_.insert({{std::move(key), std::move(value)}});
+         }
 
-               handler(error_code());
-            });
+         return error_code();
       }
       
       void read_length(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
-         try {
-            auto contentLength = requestHeaders_.find("content-length");
-            if (contentLength != requestHeaders_.end())
-               requestBytes_ = static_cast<size_t>(std::stoul(contentLength->second));
+         auto contentLength = requestHeaders_.find("content-length");
+         if (contentLength != requestHeaders_.end()) {
+            boost::iostreams::filtering_istream is(
+               boost::make_iterator_range(
+                  contentLength->second.begin(),
+                  contentLength->second.end()));
+            is >> requestBytes_;
+            if (!is) {
+               handler(make_error_code(invalid_content_length));
+               return;
+            }
          }
-         catch (...) {
-            // std::stoul() threw on the Content-Length header.
-            handler(make_error_code(invalid_content_length));
-         }
-
+         
          auto transferEncoding = requestHeaders_.find("transfer-encoding");
          if (transferEncoding != requestHeaders_.end() &&
              transferEncoding->second != "identity") {
@@ -797,37 +792,26 @@ namespace chunky {
                
                if (!requestBytes_) {
                   requestChunksPending_ = false;
-                  read_request_trailers(loadBufferFunc, handler);
-               }
-               else
-                  handler(error);
-            });
-      }
 
-      void read_request_trailers(const LoadBufferFunc& loadBufferFunc, const Handler& handler) {
-         loadBufferFunc(crlf(), [=](const error_code& error) {
-               if (error) {
-                  handler(error);
-                  return;
-               }
-               
-               std::string s = get_line();
-               if (!s.empty()) {
-                  const auto colon = s.find_first_of(':');
-                  if (colon == std::string::npos) {
-                     handler(make_error_code(invalid_request_header));
-                     return;
-                  }
+                  // Read trailers after the terminating chunk. The
+                  // trailers end with an empty line, i.e. consecutive
+                  // CRLF, but when there are no trailers we have
+                  // already consumed the first CRLF. We restore it
+                  // before loading the buffer through the empty line.
+                  streambuf_.sungetc();
+                  streambuf_.sungetc();
+                  loadBufferFunc(crlf2(), [=](const error_code& error) {
+                        if (error) {
+                           handler(error);
+                           return;
+                        }
 
-                  std::string key = "/" + s.substr(0, colon);
-                  std::string value = s.substr(colon + 1);
-                  boost::algorithm::trim_left(value);
-                  requestHeaders_.insert({{std::move(key), std::move(value)}});
-
-                  // Recursion could overflow the stack if loadBufferFunc
-                  // is synchronous, but large numbers of trailers are
-                  // not expected.
-                  read_request_trailers(loadBufferFunc, handler);
+                        // Skip the restored CRLF to position the
+                        // stream at the start of trailers.
+                        streambuf_.snextc();
+                        streambuf_.snextc();
+                        handler(read_request_headers());
+                     });
                }
                else
                   handler(error);
@@ -835,10 +819,9 @@ namespace chunky {
       }
 
       std::string prepare_write_prefix(size_t nBytes) {
-         std::string s;
          // The prefix includes the status line and headers if this is
          // the first write.
-         boost::iostreams::filtering_ostream os(boost::iostreams::back_inserter(s));
+         std::ostringstream os;
          if (responseBytes_ == 0) {
             // Set Date header if not already present.
             if (response_headers().find("date") == response_headers().end()) {
@@ -869,8 +852,7 @@ namespace chunky {
          if (responseChunked_)
             os << boost::format("%x\r\n") % nBytes;
          
-         os.reset();
-         return s;
+         return os.str();
       }
 
       std::string prepare_write_suffix(size_t nBytes) {
