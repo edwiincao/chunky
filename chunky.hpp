@@ -25,7 +25,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 #include <boost/algorithm/string/predicate.hpp>
-#include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
 #include <boost/format.hpp>
@@ -576,15 +575,16 @@ namespace chunky {
       }
 
       // Convert '+' to ' ' and percent decoding.
-      static std::string decode(const std::string& s) {
+      template<typename Iterator>
+      static std::string decode(Iterator&& bgn, Iterator&& end) {
          std::string result;
 
-         auto i = s.begin();
+         auto i = bgn;
          std::smatch escapeMatch;
          static std::regex escapeRegex("^([^+%]*)(?:\\+|(?:%([0-9A-Fa-f]{2})))");
-         while (i != s.end()) {
+         while (i != end) {
             // Look for a '+' or '%HH' where H is a valid hex digit.
-            if (std::regex_search(i, s.end(), escapeMatch, escapeRegex)) {
+            if (std::regex_search(i, end, escapeMatch, escapeRegex)) {
                // Concatenate everything up to the special character.
                result += escapeMatch[1].str();
 
@@ -599,27 +599,30 @@ namespace chunky {
             }
             else {
                // No matches so concatenate the remainder.
-               result += std::string(i, s.end());
-               i = s.end();
+               result += std::string(i, end);
+               i = end;
             }
          }
          
          return result;
       }
-      
+
       static Query parse_query(const std::string& s) {
          Query query;
-         std::vector<std::string> params;
-         boost::algorithm::split(params, s, [](char c) { return c == '&'; });
-         for (const auto& param : params) {
-            const auto equals = param.find_first_of('=');
-            if (equals == std::string::npos)
-               continue;
 
-            std::string key = decode(param.substr(0, equals));
-            std::string value = decode(param.substr(equals + 1));
-            query[key] = value;
+         auto i = s.begin();
+         std::smatch paramMatch;
+         static std::regex paramRegex("^([^=&]+)(=)?([^&]*)&?");
+         while (std::regex_search(i, s.end(), paramMatch, paramRegex)) {
+            if (paramMatch[2].matched) {
+               std::string key = decode(paramMatch[1].first, paramMatch[1].second);
+               std::string value = decode(paramMatch[3].first, paramMatch[3].second);
+               query[key] = value;
+            }
+            
+            i = paramMatch[0].second;
          }
+
          return query;
       }
       
@@ -780,8 +783,8 @@ namespace chunky {
          std::smatch resourceMatch;
          static const std::regex resourceRegex("(/[^?#]*)(?:\\?([^#]*))?(?:#(.*))?");
          if (std::regex_match(requestResource_, resourceMatch, resourceRegex)) {
-            requestPath_ = decode(resourceMatch[1]);
-            requestFragment_ = decode(resourceMatch[3]);
+            requestPath_ = decode(resourceMatch[1].first, resourceMatch[1].second);
+            requestFragment_ = decode(resourceMatch[3].first, resourceMatch[3].second);
             requestQuery_ = parse_query(resourceMatch[2].str());
          }
          
