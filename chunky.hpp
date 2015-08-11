@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
 #include <boost/format.hpp>
@@ -247,7 +248,8 @@ namespace chunky {
                       , boost::noncopyable {
    public:
       typedef std::map<std::string, std::string, detail::CaselessCompare> Headers;
-
+      typedef std::map<std::string, std::string> Query;
+      
       typedef boost::system::error_code error_code;
       typedef std::function<void(const error_code&)> Handler;
       typedef std::function<void(const error_code&, const std::shared_ptr<HTTPTemplate>&)> CreateHandler;
@@ -275,6 +277,20 @@ namespace chunky {
          return http;
       }
 
+      const std::string& request_method() const { return requestMethod_; }
+      const std::string& request_version() const { return requestVersion_; }
+      const std::string& request_resource() const { return requestResource_; }
+      const Headers& request_headers() const { return requestHeaders_; }
+
+      const std::string& request_path() const { return requestPath_; }
+      const std::string& request_fragment() const { return requestFragment_; }
+      const Query& request_query() const { return requestQuery_; }
+      
+
+      unsigned int& response_status() { return responseStatus_; }
+      Headers& response_headers() { return responseHeaders_; }
+      Headers& response_trailers() { return responseTrailers_; }
+      
       // The handler will be called as:
       //   handler(const boost::system::error_code&);
       template<typename FinishHandler>
@@ -559,14 +575,53 @@ namespace chunky {
          return stream_;
       }
 
-      const std::string& request_method() const { return requestMethod_; }
-      const std::string& request_version() const { return requestVersion_; }
-      const std::string& request_resource() const { return requestResource_; }
-      const Headers& request_headers() const { return requestHeaders_; }
+      // Convert '+' to ' ' and percent decoding.
+      static std::string decode(const std::string& s) {
+         std::string result;
 
-      unsigned int& response_status() { return responseStatus_; }
-      Headers& response_headers() { return responseHeaders_; }
-      Headers& response_trailers() { return responseTrailers_; }
+         auto i = s.begin();
+         std::smatch escapeMatch;
+         static std::regex escapeRegex("^([^+%]*)(?:\\+|(?:%([0-9A-Fa-f]{2})))");
+         while (i != s.end()) {
+            // Look for a '+' or '%HH' where H is a valid hex digit.
+            if (std::regex_search(i, s.end(), escapeMatch, escapeRegex)) {
+               // Concatenate everything up to the special character.
+               result += escapeMatch[1].str();
+
+               // Concatenate the unescaped character.
+               if (escapeMatch[2].matched)
+                  result += static_cast<char>(std::stoi(escapeMatch[2].str(), 0, 16));
+               else
+                  result += ' ';
+
+               // Update the iterator.
+               i = escapeMatch[0].second;
+            }
+            else {
+               // No matches so concatenate the remainder.
+               result += std::string(i, s.end());
+               i = s.end();
+            }
+         }
+         
+         return result;
+      }
+      
+      static Query parse_query(const std::string& s) {
+         Query query;
+         std::vector<std::string> params;
+         boost::algorithm::split(params, s, [](char c) { return c == '&'; });
+         for (const auto& param : params) {
+            const auto equals = param.find_first_of('=');
+            if (equals == std::string::npos)
+               continue;
+
+            std::string key = decode(param.substr(0, equals));
+            std::string value = decode(param.substr(equals + 1));
+            query[key] = value;
+         }
+         return query;
+      }
       
    private:
       enum { MaxDiscardBufferSize = 65536 };
@@ -579,6 +634,10 @@ namespace chunky {
       std::string requestResource_;
       Headers requestHeaders_;
 
+      std::string requestPath_;
+      std::string requestFragment_;
+      Query requestQuery_;
+      
       size_t requestBytes_;
       bool requestChunksPending_;
       
@@ -706,30 +765,34 @@ namespace chunky {
       }
 
       error_code read_request_line() {
-         auto s = get_line();
-               
          std::smatch requestMatch;
          static const std::regex requestRegex("([-!#$%^&*+._'`|~0-9A-Za-z]+) (\\S+) (HTTP/\\d\\.\\d)");
-         if (std::regex_match(s, requestMatch, requestRegex)) {
-            requestMethod_   = requestMatch[1];
-            requestResource_ = requestMatch[2];
-            requestVersion_  = requestMatch[3];
-
-            if (requestVersion_ == "HTTP/1.1")
-               return error_code();
-            else
-               return make_error_code(unsupported_http_version);
-         }
-         else
+         if (!std::regex_match(get_line(), requestMatch, requestRegex))
             return make_error_code(invalid_request_line);
+         
+         requestMethod_   = requestMatch[1];
+         requestResource_ = requestMatch[2];
+         requestVersion_  = requestMatch[3];
+
+         if (requestVersion_ != "HTTP/1.1")
+            return make_error_code(unsupported_http_version);
+
+         std::smatch resourceMatch;
+         static const std::regex resourceRegex("(/[^?#]*)(?:\\?([^#]*))?(?:#(.*))?");
+         if (std::regex_match(requestResource_, resourceMatch, resourceRegex)) {
+            requestPath_ = decode(resourceMatch[1]);
+            requestFragment_ = decode(resourceMatch[3]);
+            requestQuery_ = parse_query(resourceMatch[2].str());
+         }
+         
+         return error_code();
       }
 
       error_code read_request_headers() {
          for (auto s = get_line(); !s.empty(); s = get_line()) {
             const auto colon = s.find_first_of(':');
-            if (colon == std::string::npos) {
+            if (colon == std::string::npos)
                return make_error_code(invalid_request_header);
-            }
 
             std::string key = s.substr(0, colon);
             std::string value = s.substr(colon + 1);

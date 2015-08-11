@@ -87,7 +87,7 @@ BOOST_AUTO_TEST_CASE(Minimal) {
    class MyServer : public Server {
       void serveHandler(const std::shared_ptr<HTTP>& http) {
          BOOST_CHECK_EQUAL(http->request_method(), "GET");
-         BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
+         // BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
          
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/plain";
@@ -100,7 +100,7 @@ BOOST_AUTO_TEST_CASE(Minimal) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   auto url = (boost::format("http://localhost:%d/Minimal") % server.port()).str();
+   auto url = (boost::format("http://localhost:%d/Minimal?a=b&foo=b+a%%7er&empty=#hello") % server.port()).str();
    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
    auto status = curl_easy_perform(curl);
@@ -465,4 +465,42 @@ BOOST_AUTO_TEST_CASE(AsyncBig) {
    }
    
    curl_easy_cleanup(curl);
+}
+
+BOOST_AUTO_TEST_CASE(Query) {
+   {
+      HTTP::Query query = HTTP::parse_query("");
+      BOOST_CHECK(query.empty());
+   }
+
+   {
+      HTTP::Query query = HTTP::parse_query("foo");
+      BOOST_CHECK(query.empty());
+   }
+
+   {
+      HTTP::Query query = HTTP::parse_query("foo=bar");
+      BOOST_CHECK_EQUAL(query.size(), 1);
+      BOOST_CHECK_EQUAL(query.at("foo"), "bar");
+   }
+
+   {
+      HTTP::Query query = HTTP::parse_query("a=b&c=d&foo=bar");
+      BOOST_CHECK_EQUAL(query.size(), 3);
+      BOOST_CHECK_EQUAL(query.at("a"), "b");
+      BOOST_CHECK_EQUAL(query.at("c"), "d");
+      BOOST_CHECK_EQUAL(query.at("foo"), "bar");
+   }
+
+   {
+      HTTP::Query query = HTTP::parse_query("foo=");
+      BOOST_CHECK_EQUAL(query.size(), 1);
+      BOOST_CHECK_EQUAL(query.at("foo"), "");
+   }
+
+   {
+      HTTP::Query query = HTTP::parse_query("foo+bar%3f=a%20%3D%26");
+      BOOST_CHECK_EQUAL(query.size(), 1);
+      BOOST_CHECK_EQUAL(query.at("foo bar?"), "a =&");
+   }
 }
