@@ -17,11 +17,13 @@ limitations under the License.
 */
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <boost/algorithm/string/predicate.hpp>
@@ -243,8 +245,7 @@ namespace chunky {
    };
 
    template<typename T>
-   class HTTPTemplate : public std::enable_shared_from_this<HTTPTemplate<T> >
-                      , boost::noncopyable {
+   class HTTPTemplate : boost::noncopyable {
    public:
       typedef std::map<std::string, std::string, detail::CaselessCompare> Headers;
       typedef std::map<std::string, std::string> Query;
@@ -1030,6 +1031,125 @@ namespace chunky {
    };
    
    typedef HTTPTemplate<TCP> HTTP;
+
+   class SimpleHTTPServer : boost::noncopyable {
+   public:
+      typedef boost::system::error_code error_code;
+      typedef std::function<void(const std::shared_ptr<HTTP>&)> RequestCallback;
+      typedef std::function<void(const std::string&)> LogCallback;
+      
+      SimpleHTTPServer(const RequestCallback& requestCallback)
+         : running_(false)
+         , requestCallback_(requestCallback) {
+      }
+
+      virtual ~SimpleHTTPServer() {
+         stop();
+      }
+
+      // Add a local address/port to bind and listen.
+      virtual unsigned short listen(const boost::asio::ip::tcp::acceptor::endpoint_type& endpoint) {
+         acceptors_.emplace_back(io_, endpoint);
+         return acceptors_.back().local_endpoint().port();
+      }
+
+      // Run the server using worker threads.
+      virtual void run(size_t nThreads = std::thread::hardware_concurrency()) {
+         if (running_)
+            throw std::runtime_error("server already running");
+         running_ = true;
+
+         for (auto& acceptor : acceptors_)
+            accept(acceptor);
+         
+         for (size_t i = 0; i < nThreads; ++i) {
+            threads_.emplace_back([this]() {
+                  io_.run();
+               });
+         }
+      }
+
+      // Stop the server, blocking until in-progress connections end.
+      virtual void stop() {
+         running_ = false;
+         for (auto& acceptor : acceptors_)
+            acceptor.cancel();
+         for (auto& thread : threads_)
+            thread.join();
+
+         acceptors_.clear();
+         threads_.clear();
+      }
+
+      virtual void set_log(const LogCallback& logCallback) {
+         logCallback_ = logCallback;
+      }
+      
+      virtual void log(const std::string& message) {
+         if (logCallback_)
+            logCallback_(message);
+      }
+      
+   protected:
+      std::atomic<bool> running_;
+      boost::asio::io_service io_;
+      std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
+      std::vector<std::thread> threads_;
+      
+      RequestCallback requestCallback_;
+      LogCallback logCallback_;
+      virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
+         TCP::async_connect(
+            acceptor,
+            [&](const error_code& error, std::shared_ptr<TCP>& tcp) {
+               if (error) {
+                  log(error.message());
+                  return;
+               }
+
+               log((boost::format("connect %s:%d")
+                    % tcp->stream().remote_endpoint().address().to_string()
+                    % tcp->stream().remote_endpoint().port()).str());
+               handle_connect(error, tcp);
+
+               if (running_)
+                  accept(acceptor);
+            });
+      }
+      
+      virtual void handle_connect(
+         const boost::system::error_code& error,
+         const std::shared_ptr<TCP>& tcp) {
+         // Use the shared_ptr custom deleter to determine when to
+         // instantiate the next request on the same connection.
+         auto status = std::make_shared<error_code>();
+         std::shared_ptr<HTTP> http(
+            new HTTP(tcp),
+            [=](HTTP* pointer) {
+               if (!*status && running_) {
+                  io_.post([=]() {
+                        handle_connect(error, tcp);
+                     });
+               }
+
+               delete pointer;
+            });
+
+         // For convenience, issue a null read so that request
+         // metadata is already valid for the callback.
+         http->async_read_some(
+            boost::asio::null_buffers(),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  *status = error;
+                  log(error.message());
+                  return;
+               }
+
+               requestCallback_(http);
+            });
+      }
+   };
 }
 
 #endif // CHUNKY_HPP
