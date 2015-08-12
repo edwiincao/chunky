@@ -253,27 +253,12 @@ namespace chunky {
       typedef std::function<void(const error_code&)> Handler;
       typedef std::function<void(const error_code&, const std::shared_ptr<HTTPTemplate>&)> CreateHandler;
       
-      static void async_create(const std::shared_ptr<T>& stream, const CreateHandler& handler) {
-         using namespace std::placeholders;
-         std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
-         http->create(
-            std::bind(&HTTPTemplate::async_load_buffer, http, _1, _2),
-            [=](const error_code& error) {
-               handler(error, http);
-            });
-      }
-
-      static std::shared_ptr<HTTPTemplate> create(const std::shared_ptr<T>& stream) {
-         using namespace std::placeholders;
-         std::shared_ptr<HTTPTemplate> http(new HTTPTemplate(stream));
-         http->create(
-            std::bind(&HTTPTemplate::sync_load_buffer, http, _1, _2),
-            [=](const error_code& error) {
-               if (error)
-                  throw boost::system::system_error(error);
-            });
-
-         return http;
+      HTTPTemplate(const std::shared_ptr<T>& stream)
+         : stream_(stream)
+         , requestBytes_(0)
+         , requestChunksPending_(false)
+         , responseBytes_(0)
+         , responseChunked_(false) {
       }
 
       const std::string& request_method() const { return requestMethod_; }
@@ -390,6 +375,20 @@ namespace chunky {
       
       template<typename MutableBufferSequence, typename ReadHandler>
       void async_read_some(MutableBufferSequence&& buffers, ReadHandler&& handler) {
+         using namespace std::placeholders;
+         auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
+         if (requestMethod_.empty()) {
+            create(loadBufferFunc, [=](const error_code& error) mutable {
+                  if (error) {
+                     handler(error, 0);
+                     return;
+                  }
+
+                  async_read_some(buffers, handler);
+               });
+            return;
+         }
+         
          // Take data from the streambuf first.
          size_t nBytesRead = 0;
          const auto bufferSize = boost::asio::buffer_size(buffers);
@@ -400,8 +399,6 @@ namespace chunky {
             nBytesRead += nBytes;
          }
 
-         using namespace std::placeholders;
-         auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
          boost::asio::async_read(
             *stream(), buffers, boost::asio::transfer_exactly(nBytesRead ? 0 : requestBytes_),
             [=](const error_code& error, size_t nBytes) mutable {
@@ -444,6 +441,16 @@ namespace chunky {
 
       template<typename MutableBufferSequence>
       size_t read_some(MutableBufferSequence&& buffers, error_code& error) {
+         using namespace std::placeholders;
+         auto loadBufferFunc = std::bind(&HTTPTemplate::sync_load_buffer, this, _1, _2);
+         if (requestMethod_.empty()) {
+            create(loadBufferFunc, [&](const error_code& e) {
+                  error = e;
+               });
+            if (error)
+               return 0;
+         }
+         
          size_t result;
          auto handler = [&](const error_code& e, size_t n) {
             error = e;
@@ -462,8 +469,6 @@ namespace chunky {
 
          // Jump through some hoops to make the inner lambda exactly
          // the same as async_read_some().
-         using namespace std::placeholders;
-         auto loadBufferFunc = std::bind(&HTTPTemplate::sync_load_buffer, this, _1, _2);
          size_t nBytes = boost::asio::read(
             *stream(),
             buffers,
@@ -675,14 +680,6 @@ namespace chunky {
 
       size_t responseBytes_;
       bool responseChunked_;
-
-      HTTPTemplate(const std::shared_ptr<T>& stream)
-         : stream_(stream)
-         , requestBytes_(0)
-         , requestChunksPending_(false)
-         , responseBytes_(0)
-         , responseChunked_(false) {
-      }
 
       static const std::string& crlf() {
          static const std::string s("\r\n");

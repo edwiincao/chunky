@@ -51,8 +51,12 @@ public:
    }
 
    virtual void serve(const std::shared_ptr<TCP>& tcp) {
-      using namespace std::placeholders;
-      HTTP::async_create(tcp, std::bind(&Server::serveHandlerWrapper, this, _1, _2));
+      auto http = std::make_shared<HTTP>(tcp);
+      http->async_read_some(
+         boost::asio::null_buffers(),
+         [=](const error_code& error, size_t) {
+            serveHandlerWrapper(error, http);
+         });
    }
 
    virtual void serveHandlerWrapper(const error_code& error, const std::shared_ptr<HTTP>& http) {
@@ -87,7 +91,7 @@ BOOST_AUTO_TEST_CASE(Minimal) {
    class MyServer : public Server {
       void serveHandler(const std::shared_ptr<HTTP>& http) {
          BOOST_CHECK_EQUAL(http->request_method(), "GET");
-         // BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
+         BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
          
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/plain";
@@ -100,7 +104,7 @@ BOOST_AUTO_TEST_CASE(Minimal) {
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
-   auto url = (boost::format("http://localhost:%d/Minimal?a=b&foo=b+a%%7er&empty=#hello") % server.port()).str();
+   auto url = (boost::format("http://localhost:%d/Minimal") % server.port()).str();
    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
    auto status = curl_easy_perform(curl);
