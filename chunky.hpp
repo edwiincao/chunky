@@ -1015,6 +1015,7 @@ namespace chunky {
       
       SimpleHTTPServer(const RequestCallback& requestCallback)
          : running_(false)
+         , strand_(io_)
          , requestCallback_(requestCallback) {
       }
 
@@ -1035,7 +1036,7 @@ namespace chunky {
          running_ = true;
 
          for (auto& acceptor : acceptors_)
-            accept(acceptor);
+            strand_.dispatch([&]() { accept(acceptor); });
          
          for (size_t i = 0; i < nThreads; ++i) {
             threads_.emplace_back([this]() {
@@ -1048,7 +1049,7 @@ namespace chunky {
       virtual void stop() {
          running_ = false;
          for (auto& acceptor : acceptors_)
-            acceptor.cancel();
+            strand_.dispatch([&]() { acceptor.cancel(); });
          for (auto& thread : threads_)
             thread.join();
 
@@ -1068,12 +1069,14 @@ namespace chunky {
    protected:
       std::atomic<bool> running_;
       boost::asio::io_service io_;
+      boost::asio::io_service::strand strand_;
       std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
       std::vector<std::thread> threads_;
       
       RequestCallback requestCallback_;
       LogCallback logCallback_;
       virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
+         assert(strand_.running_in_this_thread());
          TCP::async_connect(
             acceptor,
             [&](const error_code& error, std::shared_ptr<TCP>& tcp) {
@@ -1088,7 +1091,7 @@ namespace chunky {
                handle_connect(error, tcp);
 
                if (running_)
-                  accept(acceptor);
+                  strand_.dispatch([&]() { accept(acceptor); });
             });
       }
       
