@@ -121,7 +121,12 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/ContentLength");
 
-         http->continue_request();
+         // By default, libcurl uses Expect: 100-continue requesting
+         // an informational response before uploading data. This code
+         // issues the provisional response, which is then to be
+         // followed by the final response.
+         http->response_status() = 100;
+         http->finish();
          
          boost::asio::streambuf body;
          boost::system::error_code error;

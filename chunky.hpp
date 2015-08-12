@@ -287,16 +287,16 @@ namespace chunky {
                handler(*pointer);
                delete pointer;
             });
-         
-         async_discard([=](const error_code& error) mutable {
-               // Replace any unused bytes read by get_line().
-               if (auto unused = streambuf_.size()) {
-                  stream()->put_back(streambuf_.data());
-                  streambuf_.consume(unused);
-               }
 
-               *result = error;
-            });
+         if (response_status() >= 200) {
+            async_discard([=](const error_code& error) mutable {
+                  // Replace any unused bytes read by get_line().
+                  putback_buffer();
+                  *result = error;
+               });
+         }
+         else
+            putback_buffer();
          
          // Output final empty chunk.
          async_write_some(
@@ -307,16 +307,17 @@ namespace chunky {
       }
       
       void finish() {
-         sync_discard([=](const error_code& error) {
-               if (error)
-                  throw boost::system::system_error(error);
+         if (response_status() >= 200) {
+            sync_discard([=](const error_code& error) {
+                  if (error)
+                     throw boost::system::system_error(error);
                
-               // Replace any unused bytes read by get_line().
-               if (auto unused = streambuf_.size()) {
-                  stream()->put_back(streambuf_.data());
-                  streambuf_.consume(unused);
-               }
-            });
+                  // Replace any unused bytes read by get_line().
+                  putback_buffer();
+               });
+         }
+         else
+            putback_buffer();
          
          // Replace any unused bytes read by get_line().
          if (auto unused = streambuf_.size()) {
@@ -337,39 +338,6 @@ namespace chunky {
          }
       }
 
-      void continue_request(const Handler& handler = Handler()) {
-         assert(responseBytes_ == 0);
-         auto expect = request_headers().find("Expect");
-         if (expect == request_headers().end() ||
-             expect->second.find("100-continue") == std::string::npos) {
-            if (handler)
-               handler(error_code());
-            return;
-         }
-
-         static const std::string continue100("HTTP/1.1 100 Continue\r\n\r\n");
-         if (handler) {
-            boost::asio::async_write(
-               *stream(), boost::asio::buffer(continue100),
-               [=](const error_code& error, size_t) {
-                  handler(error);
-               });
-         }
-         else {
-            boost::asio::write(
-               *stream(), boost::asio::buffer(continue100));
-         }
-      }
-
-      void continue_request(error_code& error) {
-         try {
-            continue_request();
-         }
-         catch (const boost::system::system_error& e) {
-            error = e.code();
-         }
-      }
-      
       boost::asio::io_service& get_io_service() {
          return stream()->get_io_service();
       }
@@ -711,6 +679,13 @@ namespace chunky {
          handler(error);
       }
 
+      void putback_buffer() {
+         if (auto unused = streambuf_.size()) {
+            stream()->put_back(streambuf_.data());
+            streambuf_.consume(unused);
+         }
+      }
+      
       // Asynchronously discard any unread body.
       void async_discard(const Handler& handler) {
          if (requestBytes_) {
@@ -944,10 +919,10 @@ namespace chunky {
                   responseChunked_ = true;
                   response_headers()["Transfer-Encoding"] = "chunked";
                }
-
-               write_status(os);
-               write_headers(os, response_headers());
             }
+
+            write_status(os);
+            write_headers(os, response_headers());
          }
 
          if (responseChunked_)
