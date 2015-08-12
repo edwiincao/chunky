@@ -258,6 +258,7 @@ namespace chunky {
          : stream_(stream)
          , requestBytes_(0)
          , requestChunksPending_(false)
+         , responseStatus_(0)
          , responseBytes_(0)
          , responseChunked_(false) {
       }
@@ -288,6 +289,7 @@ namespace chunky {
                delete pointer;
             });
 
+         assert(response_status() >= 100);
          if (response_status() >= 200) {
             async_discard([=](const error_code& error) mutable {
                   // Replace any unused bytes read by get_line().
@@ -307,6 +309,7 @@ namespace chunky {
       }
       
       void finish() {
+         assert(response_status() >= 100);
          if (response_status() >= 200) {
             sync_discard([=](const error_code& error) {
                   if (error)
@@ -514,10 +517,6 @@ namespace chunky {
          if (!suffix->empty())
             chunk->push_back(boost::asio::const_buffer(suffix->data(), suffix->size()));
 
-         // for (const auto& b : *chunk)
-         //    std::cout << boost::format("(%s)")
-         //       % std::string(boost::asio::buffer_cast<const char*>(b), boost::asio::buffer_size(b));
-         
          boost::asio::async_write(
             *stream(), *chunk,
             [=](const error_code& error, size_t) mutable {
