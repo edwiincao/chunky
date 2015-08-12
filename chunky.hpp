@@ -115,7 +115,7 @@ namespace chunky {
             // the data are buffered.
             boost::system::error_code error;
             const auto nBytes = read_some(buffers, error);
-            strand_.post([=]() mutable {
+            get_io_service().post([=]() mutable {
                   handler(error, nBytes);
                });
          }
@@ -312,10 +312,6 @@ namespace chunky {
                *result = error;
             });
          
-         // Use Content-Length for empty body.
-         if (!responseBytes_)
-            response_headers()["Content-Length"] = "0";
-
          // Output final empty chunk.
          async_write_some(
             boost::asio::null_buffers(),
@@ -342,10 +338,6 @@ namespace chunky {
             streambuf_.consume(unused);
          }
 
-         // Use Content-Length for empty body.
-         if (!responseBytes_)
-            response_headers()["Content-Length"] = "0";
-         
          // Output final empty chunk.
          write_some(boost::asio::null_buffers());
       }
@@ -931,21 +923,33 @@ namespace chunky {
                auto n = strftime(s, sizeof(s), "%a, %d %b %Y %T GMT", &tm);
                response_headers()["Date"] = std::string(s, n);
             }
-            
-            // Determine whether to use chunked transfer.
-            auto transferEncoding = response_headers().find("transfer-encoding");
-            if (transferEncoding != response_headers().end() &&
-                transferEncoding->second != "identity") {
-               responseChunked_ = true;
-               response_headers().erase("content-length");
-            }
-            else if (response_headers().count("content-length") == 0 && nBytes) {
-               responseChunked_ = true;
-               response_headers()["Transfer-Encoding"] = "chunked";
-            }
 
-            write_status(os);
-            write_headers(os, response_headers());
+            // RFC 2616 section 4.4:
+            //  Any response message which "MUST NOT" include a
+            //  message-body (such as the 1xx, 204, and 304 responses
+            //  and any response to a HEAD request) is always
+            //  terminated by the first empty line after the header
+            //  fields, regardless of the entity-header fields present
+            //  in the message.
+            auto status = response_status();
+            static const std::string head = "HEAD";
+            if (status >= 200 && status != 204 && status != 304 &&
+                request_method() != head) {
+               // Determine whether to use chunked transfer.
+               auto transferEncoding = response_headers().find("transfer-encoding");
+               if (transferEncoding != response_headers().end() &&
+                   transferEncoding->second != "identity") {
+                  responseChunked_ = true;
+                  response_headers().erase("content-length");
+               }
+               else if (response_headers().count("content-length") == 0) {
+                  responseChunked_ = true;
+                  response_headers()["Transfer-Encoding"] = "chunked";
+               }
+
+               write_status(os);
+               write_headers(os, response_headers());
+            }
          }
 
          if (responseChunked_)
