@@ -15,64 +15,25 @@
 #include "chunky.hpp"
 
 using namespace chunky;
+using boost::system::error_code;
+
 #define LOG(LEVEL) BOOST_LOG_TRIVIAL(LEVEL)
 
-class Server {
-   boost::asio::io_service io_;
-   boost::asio::ip::tcp::acceptor acceptor_;
-   std::thread t_;
-   
+class TestServer : public chunky::SimpleHTTPServer {
+   unsigned short port_;
 public:
-   typedef boost::system::error_code error_code;
+   TestServer(const chunky::SimpleHTTPServer::RequestCallback& callback)
+      : chunky::SimpleHTTPServer(callback) {
+      using boost::asio::ip::tcp;
+      port_ = listen(tcp::endpoint(tcp::v4(), 0));
+      run(1);
+   }
+
+   unsigned short port() const { return port_; }
    
-   Server()
-      : acceptor_(io_, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), 0)) {
-      using namespace std::placeholders;
-      LOG(info) << "listening on port " << port();
-      TCP::async_connect(acceptor_, std::bind(&Server::acceptHandler, this, _1, _2));
-      std::thread([this]() { io_.run(); }).swap(t_);
+   void log(const std::string& message) {
+      LOG(info) << message;
    }
-
-   virtual ~Server() {
-      t_.join();
-   }
-
-   virtual unsigned short port() {
-      return acceptor_.local_endpoint().port();
-   }
-
-   virtual void acceptHandler(const error_code& error, const std::shared_ptr<TCP>& tcp) {
-      if (error) {
-         LOG(error) << "accept" << error.message();
-         return;
-      }
-
-      serve(tcp);
-   }
-
-   virtual void serve(const std::shared_ptr<TCP>& tcp) {
-      auto http = std::make_shared<HTTP>(tcp);
-      http->async_read_some(
-         boost::asio::null_buffers(),
-         [=](const error_code& error, size_t) {
-            serveHandlerWrapper(error, http);
-         });
-   }
-
-   virtual void serveHandlerWrapper(const error_code& error, const std::shared_ptr<HTTP>& http) {
-      if (error) {
-         LOG(info) << error.message();
-         return;
-      }
-         
-      LOG(info) << boost::format("%s %s")
-         % http->request_method()
-         % http->request_resource();
-
-      serveHandler(http);
-   }
-
-   virtual void serveHandler(const std::shared_ptr<HTTP>& http) = 0;
 };
 
 static size_t writeCB(char *s, size_t size, size_t n, void *data) {
@@ -88,18 +49,18 @@ static size_t readCB(char *s, size_t size, size_t n, void *data) {
 }
 
 BOOST_AUTO_TEST_CASE(Minimal) {
-   class MyServer : public Server {
-      void serveHandler(const std::shared_ptr<HTTP>& http) {
+   TestServer server([](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+         
          BOOST_CHECK_EQUAL(http->request_method(), "GET");
          BOOST_CHECK_EQUAL(http->request_resource(), "/Minimal");
          
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/plain";
          http->finish();
-
-         serve(http->stream());
-      }
-   } server;
+      });
 
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
@@ -116,8 +77,11 @@ static const std::string upData = "foo bar baz";
 static const std::string dnData = "how now brown cow";
 
 BOOST_AUTO_TEST_CASE(ContentLength) {
-   class MyServer : public Server {
-      void serveHandler(const std::shared_ptr<HTTP>& http) {
+   TestServer server([](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/ContentLength");
 
@@ -142,10 +106,7 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
             boost::asio::write(*http, boost::asio::buffer(&c, 1));
 
          http->finish();
-
-         serve(http->stream());
-      }
-   } server;
+      });
 
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
@@ -168,16 +129,17 @@ BOOST_AUTO_TEST_CASE(ContentLength) {
       auto status = curl_easy_perform(curl);
       BOOST_CHECK_EQUAL(status, CURLE_OK);
       BOOST_CHECK_EQUAL(os.str(), dnData);
-
-      // curl_slist_free_all(headers);
    }
    
    curl_easy_cleanup(curl);
 }
 
 BOOST_AUTO_TEST_CASE(Chunked) {
-   class MyServer : public Server {
-      void serveHandler(const std::shared_ptr<HTTP>& http) {
+   TestServer server([](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/Chunked");
 
@@ -194,10 +156,7 @@ BOOST_AUTO_TEST_CASE(Chunked) {
             boost::asio::write(*http, boost::asio::buffer(&c, 1));
 
          http->finish();
-
-         serve(http->stream());
-      }
-   } server;
+      });
 
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
@@ -232,8 +191,11 @@ BOOST_AUTO_TEST_CASE(Chunked) {
 }
 
 BOOST_AUTO_TEST_CASE(AsyncContentLength) {
-   class MyServer : public Server {
-      void serveHandler(const std::shared_ptr<HTTP>& http) {
+   TestServer server([](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncContentLength");
 
@@ -262,13 +224,13 @@ BOOST_AUTO_TEST_CASE(AsyncContentLength) {
                               LOG(error) << error.message();
                               return;
                            }
-                           serve(http->stream());
+
+                           http.get();
                         });
                   });
             });
-      }
-   } server;
-
+      });
+   
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
 
@@ -301,8 +263,11 @@ BOOST_AUTO_TEST_CASE(AsyncContentLength) {
 }
 
 BOOST_AUTO_TEST_CASE(AsyncChunked) {
-   class MyServer : public Server {
-      void serveHandler(const std::shared_ptr<HTTP>& http) {
+   TestServer server([](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+
          BOOST_CHECK_EQUAL(http->request_method(), "PUT");
          BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncChunked");
 
@@ -330,12 +295,10 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
                               LOG(error) << error.message();
                               return;
                            }
-                           serve(http->stream());
                         });
                   });
             });
-      }
-   } server;
+      });
 
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
@@ -369,64 +332,6 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
    curl_easy_cleanup(curl);
 }
 
-class AsyncBigServer : public Server {
-   std::default_random_engine rd_;
-   std::vector<char> data_;
-      
-   template<typename WriteHandler>
-   void write(
-      const std::shared_ptr<HTTP>& http,
-      size_t bytesRemaining,
-      WriteHandler&& handler) {
-      if (bytesRemaining) {
-         // Choose some number.
-         std::uniform_int_distribution<size_t> d(1, bytesRemaining);
-         size_t n = d(rd_);
-         data_.resize(n);
-         
-         boost::asio::async_write(
-            *http, boost::asio::buffer(data_),
-            [=](const boost::system::error_code& error, size_t nBytes) {
-               if (error) {
-                  handler(error);
-                  return;
-               }
-
-               // LOG(info) << boost::format("%d written") % nBytes;
-               write(http, bytesRemaining - nBytes, handler);
-            });
-               
-      }
-      else
-         handler(boost::system::error_code());
-   }
-      
-   void serveHandler(const std::shared_ptr<HTTP>& http) {
-      BOOST_CHECK_EQUAL(http->request_method(), "PUT");
-      BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncBig");
-
-      http->response_status() = 200;
-      http->response_headers()["Content-Type"] = "text/plain";
-
-      // Don't read; let finish() drain the input stream.
-      
-      write(http, 1 << 10, [=](const error_code& error) {
-            if (error) {
-               LOG(error) << error.message();
-               return;
-            }
-
-            http->async_finish([=](const error_code& error) {
-                  if (error) {
-                     LOG(error) << error.message();
-                     return;
-                  }
-                  serve(http->stream());
-               });
-         });
-   }
-};
-
 static size_t writeAsyncBigCB(char *s, size_t size, size_t n, void *) {
    return size*n;
 }
@@ -443,8 +348,72 @@ static size_t readAsyncBigCB(char *s, size_t size, size_t n, void *data) {
    return nTransfer;
 }
 
+class WriteState {
+   std::shared_ptr<HTTP> http_;
+   size_t nBytesRemaining_;
+
+   std::vector<char> data_;
+   static std::default_random_engine rd;
+
+public:
+   WriteState(const std::shared_ptr<HTTP>& http, size_t nBytes)
+      : http_(http)
+      , nBytesRemaining_(nBytes) {
+   }
+
+   void doIt(const error_code& error, size_t nBytes) {
+      if (error) {
+         LOG(error) << error.message();
+         return;
+      }
+
+      nBytesRemaining_ -= nBytes;
+      if (nBytesRemaining_) {
+         // Choose some number.
+         std::uniform_int_distribution<size_t> d(1, nBytesRemaining_);
+         size_t n = d(rd);
+         data_.resize(n);
+         
+         boost::asio::async_write(
+            *http_, boost::asio::buffer(data_),
+            [=](const error_code& error, size_t nBytes) mutable {
+               doIt(error, nBytes);
+            });
+      }
+      else {
+         http_->async_finish([=](const error_code& error) {
+               if (error) {
+                  LOG(error) << error.message();
+                  return;
+               }
+
+               http_.reset();
+            });
+      }
+   }
+};
+
+std::default_random_engine WriteState::rd;
+
 BOOST_AUTO_TEST_CASE(AsyncBig) {
-   AsyncBigServer server;
+   std::shared_ptr<WriteState> writeState;
+   
+   TestServer server([&](const std::shared_ptr<HTTP>& http) {
+         LOG(info) << boost::format("%s %s")
+            % http->request_method()
+            % http->request_resource();
+
+         BOOST_CHECK_EQUAL(http->request_method(), "PUT");
+         BOOST_CHECK_EQUAL(http->request_resource(), "/AsyncBig");
+
+         http->response_status() = 200;
+         http->response_headers()["Content-Type"] = "text/plain";
+
+         // Don't read; let finish() drain the input stream.
+
+         writeState = std::make_shared<WriteState>(http, 1 << 10);
+         writeState->doIt(error_code(), 0);
+      });
    
    CURL *curl = curl_easy_init();
    BOOST_REQUIRE(curl);
