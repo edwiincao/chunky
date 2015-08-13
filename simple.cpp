@@ -18,6 +18,7 @@ int main() {
             "<ul>"
             "<li><a href=\"async\">asynchronous</a></li>"
             "<li><a href=\"query?foo=chunky+web+server&bar=baz\">query</a></li>"
+            "<li><form id=\"f\" action=\"post\" method=\"post\"><input type=\"hidden\" name=\"a\" value=\"Lorem ipsum dolor sit amet\"><input type=\"hidden\" name=\"foo\" value=\"bar\"><input type=\"hidden\" name=\"special\" value=\"~`!@#$%^&*()-_=+[]{}\\|;:,.<>\"></form><a href=\"javascript:{}\" onclick=\"document.getElementById('f').submit(); return false;\">post</a></li>"
             "<li><a href=\"invalid\">invalid link</a></li>"
             "</ul>";
          boost::asio::write(*http, boost::asio::buffer(html));
@@ -62,10 +63,6 @@ int main() {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
-         static const std::string html =
-            "<!DOCTYPE html>"
-            "<title>query</title>";
-
          std::ostringstream os;
          os << "<!DOCTYPE html>"
             << "<title>query</title>"
@@ -82,6 +79,59 @@ int main() {
       
          boost::asio::write(*http, boost::asio::buffer(os.str()));
          http->finish();
+      });
+   
+   server.add_handler("/post", [](const std::shared_ptr<chunky::HTTP>& http) {
+         http->response_status() = 200;
+         http->response_headers()["Content-Type"] = "text/html";
+
+         // Read through end of payload.
+         auto streambuf = std::make_shared<boost::asio::streambuf>();
+         boost::asio::async_read(
+            *http, *streambuf,
+            [=](const boost::system::error_code& error, size_t nBytes) {
+               // EOF is not an error here.
+               if (error && error != make_error_code(boost::asio::error::misc_errors::eof)) {
+                  BOOST_LOG_TRIVIAL(info) << error.message();
+                  return;
+               }
+
+               std::ostringstream os;
+               os << "<!DOCTYPE html>"
+                  << "<title>post</title>"
+                  << "<h1>Post parameters</h1>"
+                  << "<ul>";
+
+               std::string s(boost::asio::buffers_begin(streambuf->data()),
+                             boost::asio::buffers_end(streambuf->data()));
+               for (const auto& value : chunky::HTTP::parse_query(s)) {
+                  os << boost::format("<li>%s = \"%s\"</li>")
+                     % value.first
+                     % value.second;
+               }
+               os << "</ul>";
+               os << "<p><a href=\"/\">back</a></p>";
+
+               auto body = std::make_shared<std::string>(os.str());
+               boost::asio::async_write(
+                  *http, boost::asio::buffer(*body),
+                  [=](const boost::system::error_code& error, size_t) {
+                     if (error) {
+                        BOOST_LOG_TRIVIAL(info) << error.message();
+                        return;
+                     }
+
+                     body.get();
+                     http->async_finish([=](const boost::system::error_code& error) {
+                           if (error) {
+                              BOOST_LOG_TRIVIAL(info) << error.message();
+                              return;
+                           }
+
+                           http.get();
+                        });
+                  });
+            });
       });
    
    // Set the optional logging callback.
