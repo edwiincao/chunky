@@ -30,7 +30,6 @@ limitations under the License.
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/asio.hpp>
 #include <boost/format.hpp>
-#include <boost/iostreams/device/back_inserter.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/utility.hpp>
 
@@ -417,7 +416,7 @@ namespace chunky {
                else {
                   error_code error;
                   if (nBytesRead == 0 && bufferSize > 0)
-                     error = boost::asio::error::make_error_code(boost::asio::error::eof);
+                     error = make_error_code(boost::asio::error::eof);
                   handler(error, nBytesRead);
                }
             });
@@ -493,7 +492,7 @@ namespace chunky {
                else {
                   error_code error;
                   if (nBytesRead == 0 && bufferSize > 0)
-                     error = boost::asio::error::make_error_code(boost::asio::error::eof);
+                     error = make_error_code(boost::asio::error::eof);
                   handler(error, nBytesRead);
                }
             });

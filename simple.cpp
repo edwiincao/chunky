@@ -121,7 +121,7 @@ int main() {
             *http, *streambuf,
             [=](const boost::system::error_code& error, size_t nBytes) {
                // EOF is not an error here.
-               if (error && error != make_error_code(boost::asio::error::misc_errors::eof)) {
+               if (error && error != make_error_code(boost::asio::error::eof)) {
                   BOOST_LOG_TRIVIAL(error) << error.message();
                   return;
                }
