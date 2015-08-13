@@ -164,7 +164,7 @@ int main() {
       });
    
    // Set the optional logging callback.
-   server.set_log([](const std::string& message) {
+   server.set_logger([](const std::string& message) {
          BOOST_LOG_TRIVIAL(info) << message;
       });
 

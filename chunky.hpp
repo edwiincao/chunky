@@ -1026,7 +1026,6 @@ namespace chunky {
    public:
       typedef boost::system::error_code error_code;
       typedef std::function<void(const std::shared_ptr<HTTP>&)> Handler;
-      typedef std::function<void(const std::string&)> LogCallback;
       
       SimpleHTTPServer(const Handler& defaultHandler = Handler())
          : running_(false)
@@ -1085,13 +1084,18 @@ namespace chunky {
          threads_.clear();
       }
 
-      virtual void set_log(const LogCallback& logCallback) {
+      typedef std::function<void(const std::string&)> LogCallback;
+      virtual void set_logger(const LogCallback& logCallback) {
          logCallback_ = logCallback;
       }
       
       virtual void log(const std::string& message) {
          if (logCallback_)
             logCallback_(message);
+      }
+
+      virtual void log(const error_code& e) {
+         log(e.message());
       }
       
    protected:
@@ -1110,7 +1114,7 @@ namespace chunky {
             acceptor,
             [&](const error_code& error, std::shared_ptr<TCP>& tcp) {
                if (error) {
-                  log(error.message());
+                  log(error);
                   return;
                }
 
@@ -1149,7 +1153,7 @@ namespace chunky {
             [=](const boost::system::error_code& error, size_t) {
                if (error) {
                   *status = error;
-                  log(error.message());
+                  log(error);
                   return;
                }
 
@@ -1170,13 +1174,13 @@ namespace chunky {
             *http, boost::asio::buffer(NotFound),
             [=](const boost::system::error_code& error, size_t) {
                if (error) {
-                  log(error.message());
+                  log(error);
                   return;
                }
 
                http->async_finish([=](const boost::system::error_code& error) {
                      if (error) {
-                        log(error.message());
+                        log(error);
                         return;
                      }
 
