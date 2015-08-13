@@ -51,13 +51,13 @@ int main() {
             *http, boost::asio::buffer(html),
             [=](const boost::system::error_code& error, size_t nBytes) {
                if (error) {
-                  BOOST_LOG_TRIVIAL(info) << error.message();
+                  BOOST_LOG_TRIVIAL(error) << error.message();
                   return;
                }
             
                http->async_finish([=](boost::system::error_code& error) {
                      if (error) {
-                        BOOST_LOG_TRIVIAL(info) << error.message();
+                        BOOST_LOG_TRIVIAL(error) << error.message();
                         return;
                      }
 
@@ -100,6 +100,18 @@ int main() {
       });
    
    server.add_handler("/post", [](const std::shared_ptr<chunky::HTTP>& http) {
+         // Demonstrate returning 100 Continue status. This is really
+         // only useful if the client sends a 'Expect: 100-continue'
+         // header but conformant clients should accept it in all
+         // cases.
+         boost::system::error_code error;
+         http->response_status() = 100; // Continue
+         http->finish(error);
+         if (error) {
+            BOOST_LOG_TRIVIAL(error) << error.message();
+            return;
+         }
+         
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
@@ -110,7 +122,7 @@ int main() {
             [=](const boost::system::error_code& error, size_t nBytes) {
                // EOF is not an error here.
                if (error && error != make_error_code(boost::asio::error::misc_errors::eof)) {
-                  BOOST_LOG_TRIVIAL(info) << error.message();
+                  BOOST_LOG_TRIVIAL(error) << error.message();
                   return;
                }
 
@@ -130,17 +142,19 @@ int main() {
                os << "</ul>";
                os << "<p><a href=\"/\">back</a></p>";
 
-               // Mixing synchronous and asynchronous I/O is okay.
+               // Mixing synchronous and asynchronous I/O is okay. The
+               // synchronous API is not as efficient but is easier to
+               // code.
                boost::system::error_code error1;
                boost::asio::write(*http, boost::asio::buffer(os.str()), error1);
                if (error1) {
-                  BOOST_LOG_TRIVIAL(info) << error1.message();
+                  BOOST_LOG_TRIVIAL(error) << error1.message();
                   return;
                }
 
                http->async_finish([=](const boost::system::error_code& error) {
                      if (error) {
-                        BOOST_LOG_TRIVIAL(info) << error.message();
+                        BOOST_LOG_TRIVIAL(error) << error.message();
                         return;
                      }
 
