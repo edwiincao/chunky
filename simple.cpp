@@ -62,7 +62,7 @@ int main() {
                      }
 
                      // The lifetime of the HTTP object must be preserved
-                     // until this final callback. This can be done
+                     // until this final continuation. This can be done
                      // either by specifying it explicitly in the lambda
                      // capture list, or by referencing it in the lambda
                      // body with default capture by value as shown here.
@@ -180,5 +180,6 @@ int main() {
    // completed. Note that browsers may leave a connection open for
    // several minutes.
    std::this_thread::sleep_for(std::chrono::seconds(60));
+   BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
    return 0;
 }

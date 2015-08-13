@@ -24,8 +24,13 @@ class TestServer : public chunky::SimpleHTTPServer {
 public:
    TestServer(const chunky::SimpleHTTPServer::Handler& callback)
       : chunky::SimpleHTTPServer(callback) {
-      using boost::asio::ip::tcp;
-      port_ = listen(tcp::endpoint(tcp::v4(), 0));
+      // Bind to the first resolution of "localhost" and an unused port.
+      boost::asio::ip::tcp::resolver resolver(get_io_service());
+      boost::asio::ip::tcp::resolver::query query("localhost", "");
+      auto endpoints = resolver.resolve(query);
+      port_ = listen(*endpoints);
+
+      // Run on a single thread for better repeatibility.
       run(1);
    }
 
@@ -353,7 +358,6 @@ class WriteState {
    size_t nBytesRemaining_;
 
    std::vector<char> data_;
-   static std::default_random_engine rd;
 
 public:
    WriteState(const std::shared_ptr<HTTP>& http, size_t nBytes)
@@ -370,6 +374,7 @@ public:
       nBytesRemaining_ -= nBytes;
       if (nBytesRemaining_) {
          // Choose some number.
+         static std::default_random_engine rd;
          std::uniform_int_distribution<size_t> d(1, nBytesRemaining_);
          size_t n = d(rd);
          data_.resize(n);
@@ -392,8 +397,6 @@ public:
       }
    }
 };
-
-std::default_random_engine WriteState::rd;
 
 BOOST_AUTO_TEST_CASE(AsyncBig) {
    std::shared_ptr<WriteState> writeState;

@@ -1042,6 +1042,8 @@ namespace chunky {
          stop();
       }
 
+      virtual boost::asio::io_service& get_io_service() { return io_; }
+      
       // Add a local address/port to bind and listen.
       virtual unsigned short listen(const boost::asio::ip::tcp::acceptor::endpoint_type& endpoint) {
          acceptors_.emplace_back(io_, endpoint);
