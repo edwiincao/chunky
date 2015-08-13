@@ -21,8 +21,20 @@ int main() {
             "<li><form id=\"f\" action=\"post\" method=\"post\"><input type=\"hidden\" name=\"a\" value=\"Lorem ipsum dolor sit amet\"><input type=\"hidden\" name=\"foo\" value=\"bar\"><input type=\"hidden\" name=\"special\" value=\"~`!@#$%^&*()-_=+[]{}\\|;:,.<>\"></form><a href=\"javascript:{}\" onclick=\"document.getElementById('f').submit(); return false;\">post</a></li>"
             "<li><a href=\"invalid\">invalid link</a></li>"
             "</ul>";
-         boost::asio::write(*http, boost::asio::buffer(html));
-         http->finish();
+
+         // Demonstrate error handling using error_code argument.
+         boost::system::error_code error;
+         boost::asio::write(*http, boost::asio::buffer(html), error);
+         if (error) {
+            BOOST_LOG_TRIVIAL(error) << error.message();
+            return;
+         }
+         
+         http->finish(error);
+         if (error) {
+            BOOST_LOG_TRIVIAL(error) << error.message();
+            return;
+         }
       });
    
    server.add_handler("/async", [](const std::shared_ptr<chunky::HTTP>& http) {
@@ -76,9 +88,15 @@ int main() {
          }
          os << "</ul>";
          os << "<p><a href=\"/\">back</a></p>";
-      
-         boost::asio::write(*http, boost::asio::buffer(os.str()));
-         http->finish();
+
+         // Demonstrate error handling using exceptions.
+         try {
+            boost::asio::write(*http, boost::asio::buffer(os.str()));
+            http->finish();
+         }
+         catch (const boost::system::system_error& e) {
+            BOOST_LOG_TRIVIAL(error) << e.what();
+         }
       });
    
    server.add_handler("/post", [](const std::shared_ptr<chunky::HTTP>& http) {
@@ -112,24 +130,21 @@ int main() {
                os << "</ul>";
                os << "<p><a href=\"/\">back</a></p>";
 
-               auto body = std::make_shared<std::string>(os.str());
-               boost::asio::async_write(
-                  *http, boost::asio::buffer(*body),
-                  [=](const boost::system::error_code& error, size_t) {
+               // Mixing synchronous and asynchronous I/O is okay.
+               boost::system::error_code error1;
+               boost::asio::write(*http, boost::asio::buffer(os.str()), error1);
+               if (error1) {
+                  BOOST_LOG_TRIVIAL(info) << error1.message();
+                  return;
+               }
+
+               http->async_finish([=](const boost::system::error_code& error) {
                      if (error) {
                         BOOST_LOG_TRIVIAL(info) << error.message();
                         return;
                      }
 
-                     body.get();
-                     http->async_finish([=](const boost::system::error_code& error) {
-                           if (error) {
-                              BOOST_LOG_TRIVIAL(info) << error.message();
-                              return;
-                           }
-
-                           http.get();
-                        });
+                     http.get();
                   });
             });
       });
