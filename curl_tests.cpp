@@ -22,7 +22,7 @@ using boost::system::error_code;
 class TestServer : public chunky::SimpleHTTPServer {
    unsigned short port_;
 public:
-   TestServer(const chunky::SimpleHTTPServer::RequestCallback& callback)
+   TestServer(const chunky::SimpleHTTPServer::Handler& callback)
       : chunky::SimpleHTTPServer(callback) {
       using boost::asio::ip::tcp;
       port_ = listen(tcp::endpoint(tcp::v4(), 0));

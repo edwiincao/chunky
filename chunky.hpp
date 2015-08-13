@@ -1,5 +1,3 @@
-#ifndef CHUNKY_HPP
-#define CHUNKY_HPP
 /*
 Copyright 2015 Shoestring Research, LLC.  All rights reserved.
 
@@ -15,6 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#ifndef CHUNKY_HPP
+#define CHUNKY_HPP
 
 #include <algorithm>
 #include <atomic>
@@ -272,13 +272,15 @@ namespace chunky {
       const std::string& request_fragment() const { return requestFragment_; }
       const Query& request_query() const { return requestQuery_; }
       
-
       unsigned int& response_status() { return responseStatus_; }
       Headers& response_headers() { return responseHeaders_; }
       Headers& response_trailers() { return responseTrailers_; }
-      
-      // The handler will be called as:
-      //   handler(const boost::system::error_code&);
+
+      // Either async_finish() or finish() must be called on each
+      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // most cases exactly one call should be made with no further
+      // usage of the instance (the exception is for returning 1xx
+      // status).
       template<typename FinishHandler>
       void async_finish(FinishHandler&& handler) {
          // Use shared_ptr lifetime to execute the handler exactly
@@ -308,6 +310,11 @@ namespace chunky {
             });
       }
       
+      // Either async_finish() or finish() must be called on each
+      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // most cases exactly one call should be made with no further
+      // usage of the instance(the exception is for returning 1xx
+      // status).
       void finish() {
          assert(response_status() >= 100);
          if (response_status() >= 200) {
@@ -332,6 +339,11 @@ namespace chunky {
          write_some(boost::asio::null_buffers());
       }
       
+      // Either async_finish() or finish() must be called on each
+      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // most cases exactly one call should be made with no further
+      // usage of the instance(the exception is for returning 1xx
+      // status).
       void finish(error_code& error) {
          try {
             finish();
@@ -925,7 +937,7 @@ namespace chunky {
          }
 
          if (responseChunked_)
-            os << boost::format("%x\r\n") % nBytes;
+            os << boost::format("%x%s") % nBytes % crlf();
          
          return os.str();
       }
@@ -989,16 +1001,18 @@ namespace chunky {
          };
 
          auto reason = reasons.find(responseStatus_);
-         os << boost::format("HTTP/1.1 %d %s\r\n")
+         os << boost::format("HTTP/1.1 %d %s%s")
             % responseStatus_
-            % (reason != reasons.end() ? reason->second : std::string());
+            % (reason != reasons.end() ? reason->second : std::string())
+            % crlf();
       }
 
       void write_headers(std::ostream& os, const Headers& headers) {
          for (const auto& value : headers) {
-            os << boost::format("%s: %s\r\n")
+            os << boost::format("%s: %s%s")
                % value.first
-               % value.second;
+               % value.second
+               % crlf();
          }
          os << crlf();
       }
@@ -1006,16 +1020,23 @@ namespace chunky {
    
    typedef HTTPTemplate<TCP> HTTP;
 
+   // This is a convenience class that may be sufficient for simple
+   // embedded server use cases, or as a starting point to build a
+   // more capable server.
    class SimpleHTTPServer : boost::noncopyable {
    public:
       typedef boost::system::error_code error_code;
-      typedef std::function<void(const std::shared_ptr<HTTP>&)> RequestCallback;
+      typedef std::function<void(const std::shared_ptr<HTTP>&)> Handler;
       typedef std::function<void(const std::string&)> LogCallback;
       
-      SimpleHTTPServer(const RequestCallback& requestCallback)
+      SimpleHTTPServer(const Handler& defaultHandler = Handler())
          : running_(false)
-         , strand_(io_)
-         , requestCallback_(requestCallback) {
+         , strand_(io_) {
+         using namespace std::placeholders;
+         if (defaultHandler)
+            handlers_[""] = defaultHandler;
+         else
+            handlers_[""] = std::bind(&SimpleHTTPServer::default_handler, this, _1);;
       }
 
       virtual ~SimpleHTTPServer() {
@@ -1028,6 +1049,13 @@ namespace chunky {
          return acceptors_.back().local_endpoint().port();
       }
 
+      virtual void add_handler(const std::string& path, const Handler& handler) {
+         if (handler)
+            handlers_[path] = handler;
+         else
+            handlers_.erase(path);
+      }
+      
       // Run the server using worker threads.
       virtual void run(size_t nThreads = std::thread::hardware_concurrency()) {
          if (running_)
@@ -1072,8 +1100,9 @@ namespace chunky {
       std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
       std::vector<std::thread> threads_;
       
-      RequestCallback requestCallback_;
+      std::map<std::string, Handler> handlers_;
       LogCallback logCallback_;
+      
       virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
          assert(strand_.running_in_this_thread());
          TCP::async_connect(
@@ -1123,7 +1152,35 @@ namespace chunky {
                   return;
                }
 
-               requestCallback_(http);
+               auto i = handlers_.find(http->request_path());
+               if (i != handlers_.end())
+                  i->second(http);
+               else
+                  handlers_.at(std::string())(http);
+            });
+      }
+
+      void default_handler(const std::shared_ptr<HTTP>& http) {
+         http->response_status() = 404;
+         http->response_headers()["Content-Type"] = "text/html";
+         
+         static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
+         boost::asio::async_write(
+            *http, boost::asio::buffer(NotFound),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  log(error.message());
+                  return;
+               }
+
+               http->async_finish([=](const boost::system::error_code& error) {
+                     if (error) {
+                        log(error.message());
+                        return;
+                     }
+
+                     http.get();
+                  });
             });
       }
    };
