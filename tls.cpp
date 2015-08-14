@@ -7,47 +7,6 @@
 #include "chunky.hpp"
 
 namespace chunky {
-#ifdef BOOST_ASIO_SSL_HPP
-   class TLS : public Stream<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> > {
-   public:
-      typedef boost::system::error_code error_code;
-      
-      template<typename CreateHandler>
-      static void async_connect(
-         boost::asio::ip::tcp::acceptor& acceptor,
-         boost::asio::ssl::context& context,
-         CreateHandler handler) {
-         // Accept a TCP connection.
-         std::shared_ptr<TLS> tls(new TLS(acceptor.get_io_service(), context));
-         acceptor.async_accept(
-            tls->stream().lowest_layer(),
-            [=](const error_code& error) {
-               if (error) {
-                  handler(error, tls);
-                  return;
-               }
-
-               // Perform TLS handshake.
-               tls->stream().async_handshake(
-                  boost::asio::ssl::stream_base::server,
-                  [=](const error_code& error) {
-                        handler(error, tls);
-                  });
-            });
-      }
-
-      template<typename ShutdownHandler>
-      void async_shutdown(ShutdownHandler&& handler) {
-         stream().async_shutdown(std::forward<ShutdownHandler>(handler));
-      }
-      
-   private:
-      TLS(boost::asio::io_service& io, boost::asio::ssl::context& context)
-         : Stream<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> >(io, context) {
-      }
-   
-   };
-#endif // BOOST_ASIO_SSL_HPP
 }
 
 int main() {
@@ -58,6 +17,7 @@ int main() {
    boost::asio::io_service io;
    boost::asio::ip::tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), 8843));
    boost::asio::ssl::context context(boost::asio::ssl::context::sslv23);
+   context.set_options(boost::asio::ssl::context::no_sslv3);
    context.use_certificate_chain_file("server.pem");
    context.use_private_key_file("server.pem", boost::asio::ssl::context::pem);
    
@@ -69,7 +29,18 @@ int main() {
             return;
          }
 
-         boost::asio::write(*tls, boost::asio::buffer(std::string("how now brown cow\n")));
+         chunky::HTTPS http(tls);
+         boost::system::error_code error1;
+         http.read_some(boost::asio::null_buffers(), error1);
+         BOOST_LOG_TRIVIAL(info) << boost::format("%s %s")
+            % http.request_method()
+            % http.request_resource();
+
+         http.response_status() = 200;
+         http.response_headers()["Content-Type"] = "text/plain";
+         
+         boost::asio::write(http, boost::asio::buffer(std::string("how now brown cow\n")));
+         http.finish();
       });
       
    io.run();

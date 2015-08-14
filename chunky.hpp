@@ -249,6 +249,48 @@ namespace chunky {
       }
    };
 
+#ifdef BOOST_ASIO_SSL_HPP
+   class TLS : public Stream<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> > {
+   public:
+      typedef boost::system::error_code error_code;
+      
+      template<typename CreateHandler>
+      static void async_connect(
+         boost::asio::ip::tcp::acceptor& acceptor,
+         boost::asio::ssl::context& context,
+         CreateHandler handler) {
+         // Accept a TCP connection.
+         std::shared_ptr<TLS> tls(new TLS(acceptor.get_io_service(), context));
+         acceptor.async_accept(
+            tls->stream().lowest_layer(),
+            [=](const error_code& error) {
+               if (error) {
+                  handler(error, tls);
+                  return;
+               }
+
+               // Perform TLS handshake.
+               tls->stream().async_handshake(
+                  boost::asio::ssl::stream_base::server,
+                  [=](const error_code& error) {
+                        handler(error, tls);
+                  });
+            });
+      }
+
+      template<typename ShutdownHandler>
+      void async_shutdown(ShutdownHandler&& handler) {
+         stream().async_shutdown(std::forward<ShutdownHandler>(handler));
+      }
+      
+   private:
+      TLS(boost::asio::io_service& io, boost::asio::ssl::context& context)
+         : Stream<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> >(io, context) {
+      }
+   
+   };
+#endif // BOOST_ASIO_SSL_HPP
+
    template<typename T>
    class HTTPTemplate : boost::noncopyable {
    public:
@@ -1024,7 +1066,10 @@ namespace chunky {
    };
    
    typedef HTTPTemplate<TCP> HTTP;
-
+#ifdef BOOST_ASIO_SSL_HPP
+   typedef HTTPTemplate<TLS> HTTPS;
+#endif
+   
    // This is a convenience class that may be sufficient for simple
    // embedded server use cases, or as a starting point to build a
    // more capable server.
