@@ -1070,11 +1070,11 @@ namespace chunky {
    typedef HTTPTemplate<TLS> HTTPS;
 #endif
 
-   template<typename Transport>
+   template<typename T>
    class BaseHTTPServer : boost::noncopyable {
    public:
       typedef boost::system::error_code error_code;
-      typedef HTTPTemplate<Transport> Transaction;
+      typedef HTTPTemplate<T> Transaction;
       typedef std::function<void(const std::shared_ptr<Transaction>&)> Handler;
 
       BaseHTTPServer(const Handler& defaultHandler = Handler())
@@ -1149,6 +1149,8 @@ namespace chunky {
       }
       
    protected:
+      typedef T Transport;
+      
       std::atomic<bool> running_;
       boost::asio::io_service io_;
       boost::asio::io_service::strand strand_;
@@ -1160,29 +1162,41 @@ namespace chunky {
       
       virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
          assert(strand_.running_in_this_thread());
-         TCP::async_connect(
+         connect_transport(
             acceptor,
-            [&](const error_code& error, std::shared_ptr<TCP>& tcp) {
+            [&](const error_code& error, const std::shared_ptr<T>& transport) {
                if (error) {
                   log(error);
                   return;
                }
 
                log((boost::format("connect %s:%d")
-                    % tcp->stream().remote_endpoint().address().to_string()
-                    % tcp->stream().remote_endpoint().port()).str());
-               handle_connect(error, tcp);
+                    % transport->stream().lowest_layer().remote_endpoint().address().to_string()
+                    % transport->stream().lowest_layer().remote_endpoint().port()).str());
+               handle_connect(error, transport);
 
                if (running_)
                   strand_.dispatch([&]() { accept(acceptor); });
             });
       }
+
+      virtual void connect_transport(
+         boost::asio::ip::tcp::acceptor& acceptor,
+         const std::function<void(const error_code&, const std::shared_ptr<T>&)>& handler) = 0;
       
       virtual void handle_connect(
          const boost::system::error_code& error,
-         const std::shared_ptr<TCP>& tcp) = 0;
+         const std::shared_ptr<T>& transport) = 0;
 
-      void default_handler(const std::shared_ptr<HTTP>& http) {
+      virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
+         auto i = handlers_.find(transaction->request_path());
+         if (i != handlers_.end())
+            i->second(transaction);
+         else
+            handlers_.at(std::string())(transaction);
+      }
+      
+      void default_handler(const std::shared_ptr<Transaction>& http) {
          http->response_status() = 404;
          http->response_headers()["Content-Type"] = "text/html";
          
@@ -1207,28 +1221,31 @@ namespace chunky {
       }
    };
 
-   // This is a convenience class that may be sufficient for simple
-   // embedded server use cases, or as a starting point to build a
-   // more capable server.
    class SimpleHTTPServer : public BaseHTTPServer<TCP> {
    public:
       SimpleHTTPServer(const Handler& defaultHandler = Handler())
          : BaseHTTPServer(defaultHandler) {
       }
 
-   protected:
+   private:
+      virtual void connect_transport(
+         boost::asio::ip::tcp::acceptor& acceptor,
+         const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) {
+         Transport::async_connect(acceptor, handler);
+      }
+
       virtual void handle_connect(
          const boost::system::error_code& error,
-         const std::shared_ptr<TCP>& tcp) {
+         const std::shared_ptr<Transport>& transport) {
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
          auto status = std::make_shared<error_code>();
-         std::shared_ptr<HTTP> http(
-            new HTTP(tcp),
-            [=](HTTP* pointer) {
+         std::shared_ptr<Transaction> http(
+            new Transaction(transport),
+            [=](Transaction* pointer) {
                if (!*status && running_) {
                   io_.post([=]() {
-                        handle_connect(error, tcp);
+                        handle_connect(error, transport);
                      });
                }
 
@@ -1246,14 +1263,63 @@ namespace chunky {
                   return;
                }
 
-               auto i = handlers_.find(http->request_path());
-               if (i != handlers_.end())
-                  i->second(http);
-               else
-                  handlers_.at(std::string())(http);
+               dispatch_transaction(http);
             });
       }
    };
+
+#ifdef BOOST_ASIO_SSL_HPP
+   class SimpleHTTPSServer : public BaseHTTPServer<TLS> {
+   public:
+      SimpleHTTPSServer(boost::asio::ssl::context& context, const Handler& defaultHandler = Handler())
+         : BaseHTTPServer(defaultHandler)
+         , context_(context) {
+      }
+
+   private:
+      boost::asio::ssl::context& context_;
+      
+      virtual void connect_transport(
+         boost::asio::ip::tcp::acceptor& acceptor,
+         const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) {
+         Transport::async_connect(acceptor, context_, handler);
+      }
+
+      virtual void handle_connect(
+         const boost::system::error_code& error,
+         const std::shared_ptr<Transport>& transport) {
+         // Use the shared_ptr custom deleter to determine when to
+         // instantiate the next request on the same connection.
+         auto status = std::make_shared<error_code>();
+         std::shared_ptr<Transaction> http(
+            new Transaction(transport),
+            [=](Transaction* pointer) {
+               if (!*status && running_) {
+                  io_.post([=]() {
+                        handle_connect(error, transport);
+                     });
+               }
+
+               delete pointer;
+            });
+
+         // For convenience, issue a null read so that request
+         // metadata is already valid for the callback.
+         http->async_read_some(
+            boost::asio::null_buffers(),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  *status = error;
+                  log(error);
+                  return;
+               }
+
+               dispatch_transaction(http);
+            });
+      }
+   };
+#endif
+   
 }
 
 #endif // CHUNKY_HPP
