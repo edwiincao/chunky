@@ -32,7 +32,7 @@ elif sys.platform.startswith('linux'):
     env.Append(CXXFLAGS = ['-std=c++0x', '-pthread'])
     env.Append(LINKFLAGS = ['-pthread'])
 
-env.Append(LIBS=['curl'])
+env.Append(LIBS=['curl', 'ssl', 'crypto'])
 env.Append(LIBS=['boost_log-mt', 'boost_system-mt', 'boost_unit_test_framework-mt'])
 
 # Project configuration.

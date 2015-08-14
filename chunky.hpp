@@ -198,6 +198,12 @@ namespace chunky {
          : stream_(std::forward<A0>(a0))
          , strand_(stream_.get_io_service()) {
       }
+
+      template<typename A0, typename A1>
+      Stream(A0&& a0, A1&& a1)
+         : stream_(std::forward<A0>(a0), std::forward<A1>(a1))
+         , strand_(stream_.get_io_service()) {
+      }
       
    private:
       T stream_;
