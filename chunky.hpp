@@ -292,16 +292,16 @@ namespace chunky {
 #endif // BOOST_ASIO_SSL_HPP
 
    template<typename T>
-   class HTTPTemplate : boost::noncopyable {
+   class HTTPTransaction : boost::noncopyable {
    public:
       typedef std::map<std::string, std::string, detail::CaselessCompare> Headers;
       typedef std::map<std::string, std::string> Query;
       
       typedef boost::system::error_code error_code;
       typedef std::function<void(const error_code&)> Handler;
-      typedef std::function<void(const error_code&, const std::shared_ptr<HTTPTemplate>&)> CreateHandler;
+      typedef std::function<void(const error_code&, const std::shared_ptr<HTTPTransaction>&)> CreateHandler;
       
-      HTTPTemplate(const std::shared_ptr<T>& stream)
+      HTTPTransaction(const std::shared_ptr<T>& stream)
          : stream_(stream)
          , requestBytes_(0)
          , requestChunksPending_(false)
@@ -324,7 +324,7 @@ namespace chunky {
       Headers& response_trailers() { return responseTrailers_; }
 
       // Either async_finish() or finish() must be called on each
-      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // HTTPTransaction instance to ensure valid I/O on the stream. In
       // most cases exactly one call should be made with no further
       // usage of the instance (the exception is for returning 1xx
       // status).
@@ -358,7 +358,7 @@ namespace chunky {
       }
       
       // Either async_finish() or finish() must be called on each
-      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // HTTPTransaction instance to ensure valid I/O on the stream. In
       // most cases exactly one call should be made with no further
       // usage of the instance(the exception is for returning 1xx
       // status).
@@ -387,7 +387,7 @@ namespace chunky {
       }
       
       // Either async_finish() or finish() must be called on each
-      // HTTPTemplate instance to ensure valid I/O on the stream. In
+      // HTTPTransaction instance to ensure valid I/O on the stream. In
       // most cases exactly one call should be made with no further
       // usage of the instance(the exception is for returning 1xx
       // status).
@@ -407,7 +407,7 @@ namespace chunky {
       template<typename MutableBufferSequence, typename ReadHandler>
       void async_read_some(MutableBufferSequence&& buffers, ReadHandler&& handler) {
          using namespace std::placeholders;
-         auto loadBufferFunc = std::bind(&HTTPTemplate::async_load_buffer, this, _1, _2);
+         auto loadBufferFunc = std::bind(&HTTPTransaction::async_load_buffer, this, _1, _2);
          if (requestMethod_.empty()) {
             create(loadBufferFunc, [=](const error_code& error) mutable {
                   if (error) {
@@ -473,7 +473,7 @@ namespace chunky {
       template<typename MutableBufferSequence>
       size_t read_some(MutableBufferSequence&& buffers, error_code& error) {
          using namespace std::placeholders;
-         auto loadBufferFunc = std::bind(&HTTPTemplate::sync_load_buffer, this, _1, _2);
+         auto loadBufferFunc = std::bind(&HTTPTransaction::sync_load_buffer, this, _1, _2);
          if (requestMethod_.empty()) {
             create(loadBufferFunc, [&](const error_code& e) {
                   error = e;
@@ -1065,16 +1065,16 @@ namespace chunky {
       }
    };
    
-   typedef HTTPTemplate<TCP> HTTP;
+   typedef HTTPTransaction<TCP> HTTP;
 #ifdef BOOST_ASIO_SSL_HPP
-   typedef HTTPTemplate<TLS> HTTPS;
+   typedef HTTPTransaction<TLS> HTTPS;
 #endif
 
    template<typename T>
    class BaseHTTPServer : boost::noncopyable {
    public:
       typedef boost::system::error_code error_code;
-      typedef HTTPTemplate<T> Transaction;
+      typedef HTTPTransaction<T> Transaction;
       typedef std::function<void(const std::shared_ptr<Transaction>&)> Handler;
 
       BaseHTTPServer(const Handler& defaultHandler = Handler())
@@ -1165,15 +1165,19 @@ namespace chunky {
          connect_transport(
             acceptor,
             [&](const error_code& error, const std::shared_ptr<T>& transport) {
-               if (error) {
-                  log(error);
-                  return;
+               if (!error) {
+                  log((boost::format("connect %s:%d")
+                       % transport->stream().lowest_layer().remote_endpoint().address().to_string()
+                       % transport->stream().lowest_layer().remote_endpoint().port()).str());
+                  prepare_transaction(transport);
                }
+               else {
+                  log(error);
 
-               log((boost::format("connect %s:%d")
-                    % transport->stream().lowest_layer().remote_endpoint().address().to_string()
-                    % transport->stream().lowest_layer().remote_endpoint().port()).str());
-               handle_connect(error, transport);
+                  // Stop accepting on system errors to avoid runaway.
+                  if (error.category() == boost::asio::error::get_system_category())
+                     return;
+               }
 
                if (running_)
                   strand_.dispatch([&]() { accept(acceptor); });
@@ -1184,9 +1188,7 @@ namespace chunky {
          boost::asio::ip::tcp::acceptor& acceptor,
          const std::function<void(const error_code&, const std::shared_ptr<T>&)>& handler) = 0;
       
-      virtual void handle_connect(
-         const boost::system::error_code& error,
-         const std::shared_ptr<T>& transport) = 0;
+      virtual void prepare_transaction(const std::shared_ptr<T>& transport) = 0;
 
       virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
          auto i = handlers_.find(transaction->request_path());
@@ -1219,6 +1221,25 @@ namespace chunky {
                   });
             });
       }
+
+      static bool keep_alive(Transaction& http) {
+         if (http.response_status() == 101)
+            return false;
+         
+         static const std::string connection("Connection");
+         static const std::string close("close");
+         auto requestConnection = http.request_headers().find(connection);
+         if (requestConnection != http.request_headers().end() &&
+             requestConnection->second == close)
+            return false;
+
+         auto responseConnection = http.response_headers().find(connection);
+         if (responseConnection != http.response_headers().end() &&
+             responseConnection->second == close)
+            return false;
+
+         return true;
+      }
    };
 
    class SimpleHTTPServer : public BaseHTTPServer<TCP> {
@@ -1234,18 +1255,17 @@ namespace chunky {
          Transport::async_connect(acceptor, handler);
       }
 
-      virtual void handle_connect(
-         const boost::system::error_code& error,
-         const std::shared_ptr<Transport>& transport) {
+      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
-         auto status = std::make_shared<error_code>();
+         auto keepalive = std::make_shared<bool>(true);
          std::shared_ptr<Transaction> http(
             new Transaction(transport),
             [=](Transaction* pointer) {
-               if (!*status && running_) {
+               *keepalive &= running_ && keep_alive(*pointer);
+               if (*keepalive) {
                   io_.post([=]() {
-                        handle_connect(error, transport);
+                        prepare_transaction(transport);
                      });
                }
 
@@ -1258,8 +1278,8 @@ namespace chunky {
             boost::asio::null_buffers(),
             [=](const boost::system::error_code& error, size_t) {
                if (error) {
-                  *status = error;
                   log(error);
+                  *keepalive = false;
                   return;
                }
 
@@ -1285,18 +1305,17 @@ namespace chunky {
          Transport::async_connect(acceptor, context_, handler);
       }
 
-      virtual void handle_connect(
-         const boost::system::error_code& error,
-         const std::shared_ptr<Transport>& transport) {
+      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
-         auto status = std::make_shared<error_code>();
+         auto keepalive = std::make_shared<bool>(true);
          std::shared_ptr<Transaction> http(
             new Transaction(transport),
             [=](Transaction* pointer) {
-               if (!*status && running_) {
+               *keepalive &= running_ && keep_alive(*pointer);
+               if (*keepalive) {
                   io_.post([=]() {
-                        handle_connect(error, transport);
+                        prepare_transaction(transport);
                      });
                }
 
@@ -1307,10 +1326,24 @@ namespace chunky {
          // metadata is already valid for the callback.
          http->async_read_some(
             boost::asio::null_buffers(),
-            [=](const boost::system::error_code& error, size_t) {
+            [=](boost::system::error_code error, size_t) {
                if (error) {
-                  *status = error;
+                  // Cleanly terminate TLS if necessary.
+                  if (error.category() == boost::asio::error::get_ssl_category()) {
+                     std::shared_ptr<TLS> tls = http->stream();
+                     tls->stream().async_shutdown([=](const error_code& error) {
+                           tls.get();
+                        });
+                  }
+                  
+                  // Convert short read error into EOF for consistency
+                  // with TCP.
+                  if (error.category() == boost::asio::error::get_ssl_category() &&
+                      error.value() == ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ))
+                     error = make_error_code(boost::asio::error::eof);
+
                   log(error);
+                  *keepalive = false;
                   return;
                }
 
