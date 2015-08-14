@@ -1069,26 +1069,25 @@ namespace chunky {
 #ifdef BOOST_ASIO_SSL_HPP
    typedef HTTPTemplate<TLS> HTTPS;
 #endif
-   
-   // This is a convenience class that may be sufficient for simple
-   // embedded server use cases, or as a starting point to build a
-   // more capable server.
-   class SimpleHTTPServer : boost::noncopyable {
+
+   template<typename Transport>
+   class BaseHTTPServer : boost::noncopyable {
    public:
       typedef boost::system::error_code error_code;
-      typedef std::function<void(const std::shared_ptr<HTTP>&)> Handler;
-      
-      SimpleHTTPServer(const Handler& defaultHandler = Handler())
+      typedef HTTPTemplate<Transport> Transaction;
+      typedef std::function<void(const std::shared_ptr<Transaction>&)> Handler;
+
+      BaseHTTPServer(const Handler& defaultHandler = Handler())
          : running_(false)
          , strand_(io_) {
          using namespace std::placeholders;
          if (defaultHandler)
             handlers_[""] = defaultHandler;
          else
-            handlers_[""] = std::bind(&SimpleHTTPServer::default_handler, this, _1);;
+            handlers_[""] = std::bind(&BaseHTTPServer::default_handler, this, _1);;
       }
 
-      virtual ~SimpleHTTPServer() {
+      virtual ~BaseHTTPServer() {
          stop();
       }
 
@@ -1181,6 +1180,45 @@ namespace chunky {
       
       virtual void handle_connect(
          const boost::system::error_code& error,
+         const std::shared_ptr<TCP>& tcp) = 0;
+
+      void default_handler(const std::shared_ptr<HTTP>& http) {
+         http->response_status() = 404;
+         http->response_headers()["Content-Type"] = "text/html";
+         
+         static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
+         boost::asio::async_write(
+            *http, boost::asio::buffer(NotFound),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  log(error);
+                  return;
+               }
+
+               http->async_finish([=](const boost::system::error_code& error) {
+                     if (error) {
+                        log(error);
+                        return;
+                     }
+
+                     http.get();
+                  });
+            });
+      }
+   };
+
+   // This is a convenience class that may be sufficient for simple
+   // embedded server use cases, or as a starting point to build a
+   // more capable server.
+   class SimpleHTTPServer : public BaseHTTPServer<TCP> {
+   public:
+      SimpleHTTPServer(const Handler& defaultHandler = Handler())
+         : BaseHTTPServer(defaultHandler) {
+      }
+
+   protected:
+      virtual void handle_connect(
+         const boost::system::error_code& error,
          const std::shared_ptr<TCP>& tcp) {
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
@@ -1213,30 +1251,6 @@ namespace chunky {
                   i->second(http);
                else
                   handlers_.at(std::string())(http);
-            });
-      }
-
-      void default_handler(const std::shared_ptr<HTTP>& http) {
-         http->response_status() = 404;
-         http->response_headers()["Content-Type"] = "text/html";
-         
-         static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
-         boost::asio::async_write(
-            *http, boost::asio::buffer(NotFound),
-            [=](const boost::system::error_code& error, size_t) {
-               if (error) {
-                  log(error);
-                  return;
-               }
-
-               http->async_finish([=](const boost::system::error_code& error) {
-                     if (error) {
-                        log(error);
-                        return;
-                     }
-
-                     http.get();
-                  });
             });
       }
    };
