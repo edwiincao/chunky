@@ -40,30 +40,7 @@ public:
 
    template<typename ConstBufferSequence, typename WriteHandler>
    void async_send(uint8_t meta, const ConstBufferSequence& buffers, WriteHandler&& handler) {
-      auto header = std::make_shared<std::vector<char> >();
-      header->push_back(static_cast<char>(meta));
-      
-      const size_t bufferSize = boost::asio::buffer_size(buffers);
-      if (bufferSize < 126) {
-         header->push_back(static_cast<char>(bufferSize));
-      }
-      else if (bufferSize < 65536) {
-         header->push_back(static_cast<char>(126));
-         header->push_back(static_cast<char>((bufferSize >> 8) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 0) & 0xff));
-      }
-      else {
-         header->push_back(static_cast<char>(127));
-         header->push_back(static_cast<char>((bufferSize >> 56) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 48) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 40) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 32) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 24) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >> 16) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >>  8) & 0xff));
-         header->push_back(static_cast<char>((bufferSize >>  0) & 0xff));
-      }
-
+      auto header = std::make_shared<std::vector<char> >(generate_header(meta, buffers));
       boost::asio::async_write(
          *stream(), boost::asio::buffer(*header),
          [=](const error_code& error, size_t) {
@@ -81,13 +58,52 @@ public:
                      return;
                   }
 
-                  handler(error, bufferSize);
+                  handler(error, boost::asio::buffer_size(buffers));
                });
          });
    }
 
+   template<typename ConstBufferSequence>
+   size_t send(uint8_t meta, const ConstBufferSequence& buffers, error_code& error) {
+      auto header = generate_header(meta, buffers);
+      boost::asio::write(*stream(), boost::asio::buffer(header), error);
+      if (error)
+         return 0;
+
+      return boost::asio::write(*stream(), buffers, error);
+   }
+   
 private:
    std::shared_ptr<T> stream_;
+
+   template<typename ConstBufferSequence>
+   std::vector<char> generate_header(uint8_t meta, const ConstBufferSequence& buffers) {
+      std::vector<char> header;
+      header.push_back(static_cast<char>(meta));
+      
+      const size_t bufferSize = boost::asio::buffer_size(buffers);
+      if (bufferSize < 126) {
+         header.push_back(static_cast<char>(bufferSize));
+      }
+      else if (bufferSize < 65536) {
+         header.push_back(static_cast<char>(126));
+         header.push_back(static_cast<char>((bufferSize >> 8) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 0) & 0xff));
+      }
+      else {
+         header.push_back(static_cast<char>(127));
+         header.push_back(static_cast<char>((bufferSize >> 56) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 48) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 40) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 32) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 24) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >> 16) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >>  8) & 0xff));
+         header.push_back(static_cast<char>((bufferSize >>  0) & 0xff));
+      }
+
+      return header;
+   }
 };
 
 template<typename T>
@@ -105,7 +121,10 @@ static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
    BOOST_LOG_TRIVIAL(info) << "creating WebSocket";
    auto ws = std::make_shared<WS>(tcp);
 
-   static const std::string s("how now brown cow");
+   boost::system::error_code error;
+   ws->send(WS::fin | WS::text, boost::asio::buffer(std::string("synchronous send")), error);
+   
+   static const std::string s("asynchronous send");
    ws->async_send(
       WS::fin | WS::text, boost::asio::buffer(s),
       [=](const boost::system::error_code& error, size_t) {
