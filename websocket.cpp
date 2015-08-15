@@ -8,6 +8,10 @@
 
 #include "chunky.hpp"
 
+// This is a simple implementation of the WebSocket frame protocol. It
+// can be used to communicate with a WebSocket client after a
+// successful handshake. The class is stateless, so all methods are
+// static and require a stream argument.
 class WebSocket {
 public:
    typedef std::vector<char> FramePayload;
@@ -221,10 +225,13 @@ private:
    }
 };
 
+// This is a sample WebSocket session function. It manages one
+// connection over its stream argument.
 static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
    // Reply to incoming frames a fixed number of times, then close.
    auto nRepliesRemaining = std::make_shared<int>(5);
 
+   // Receive frames until an error or close.
    WebSocket::receive_frames(
       tcp,
       [=](const boost::system::error_code& error,
@@ -266,6 +273,8 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
 
 int main() {
    chunky::SimpleHTTPServer server;
+
+   // Simple web page that opens a WebSocket on the server.
    server.add_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
@@ -275,7 +284,7 @@ int main() {
             "<title>chunky WebSocket</title>"
             "<h1>chunky WebSocket</h1>"
             "<script>\n"
-            "  var socket = new WebSocket('ws://localhost:8800/ws');\n"
+            "  var socket = new WebSocket('ws://' + location.host + '/ws');\n"
             "  socket.onopen = function() {\n"
             "    console.log('onopen')\n;"
             "    socket.send('from onopen');\n"   
@@ -302,6 +311,7 @@ int main() {
          http->finish(error);
       });
 
+   // Perform the WebSocket handshake on /ws.
    server.add_handler("/ws", [](const std::shared_ptr<chunky::HTTP>& http) {
          BOOST_LOG_TRIVIAL(info) << boost::format("%s %s")
             % http->request_method()
@@ -326,6 +336,7 @@ int main() {
             return;
          }
 
+         // Handshake complete, hand off stream.
          speak_websocket(http->stream());
       });
    
@@ -345,7 +356,7 @@ int main() {
    // destructor will block until all existing TCP connections are
    // completed. Note that browsers may leave a connection open for
    // several minutes.
-   std::this_thread::sleep_for(std::chrono::seconds(600));
+   std::this_thread::sleep_for(std::chrono::seconds(60));
    BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
    return 0;
 }
