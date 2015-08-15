@@ -36,7 +36,8 @@ public:
             }
 
             handler(boost::system::error_code(), type, payload);
-            receive_frames(stream, handler);
+            if (type != (fin | close))
+               receive_frames(stream, handler);
          });
    }
 
@@ -220,20 +221,9 @@ private:
    }
 };
 
-static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
-   WebSocket::send_frame(
-      tcp, WebSocket::fin | WebSocket::text,
-      boost::asio::buffer(std::string("synchronous send")));
-   
-   static const std::string s("asynchronous send");
-   WebSocket::send_frame(
-      tcp, WebSocket::fin | WebSocket::text, boost::asio::buffer(s),
-      [=](const boost::system::error_code& error) {
-         if (error) {
-            BOOST_LOG_TRIVIAL(error) << error.message();
-            return;
-         }
-      });
+static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
+   // Reply to incoming frames a fixed number of times, then close.
+   auto nRepliesRemaining = std::make_shared<int>(5);
 
    WebSocket::receive_frames(
       tcp,
@@ -245,11 +235,33 @@ static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
             return;
          }
 
-         BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
+         switch(type & 0x7f) {
+         case WebSocket::continuation:
+         case WebSocket::text:
+         case WebSocket::binary:
+            BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
+            if (*nRepliesRemaining) {
+               WebSocket::send_frame(
+                  tcp,
+                  WebSocket::fin | WebSocket::text,
+                  boost::asio::buffer(std::to_string(*nRepliesRemaining)));
+               --*nRepliesRemaining;
+            }
+            else
+               WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
+            break;
+         case WebSocket::ping:
+            BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
+            WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
+            break;
+         case WebSocket::pong:
+            BOOST_LOG_TRIVIAL(info) << "WebSocket::pong";
+            break;
+         case WebSocket::close:
+            BOOST_LOG_TRIVIAL(info) << "WebSocket::close";
+            break;
+         }
       });
-   
-   while (true)
-      std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 int main() {
@@ -269,11 +281,14 @@ int main() {
             "    socket.send('from onopen');\n"   
             "  }\n"
             "  socket.onmessage = function(e) {\n"
-            "    console.log(e.data);\n"
+            "    console.log('onmessage' + e.data);\n"
             "    socket.send('from onmessage');\n"   
             "  }\n"
+            "  socket.onclose = function(error) {\n"
+            "    console.log('onclose');\n"
+            "  }\n"
             "  socket.onerror = function(error) {\n"
-            "    console.log(error);\n"
+            "    console.log('onerror' + error);\n"
             "  }\n"
             "</script>\n";
          
@@ -291,10 +306,6 @@ int main() {
          BOOST_LOG_TRIVIAL(info) << boost::format("%s %s")
             % http->request_method()
             % http->request_resource();
-         for (const auto& value : http->request_headers())
-            BOOST_LOG_TRIVIAL(info) << boost::format("%s: %s")
-               % value.first
-               % value.second;
 
          auto key = http->request_headers().find("Sec-WebSocket-Key");
          if (key != http->request_headers().end()) {
@@ -315,7 +326,7 @@ int main() {
             return;
          }
 
-         handle_connection(http->stream());
+         speak_websocket(http->stream());
       });
    
    // Set the optional logging callback.
@@ -334,7 +345,7 @@ int main() {
    // destructor will block until all existing TCP connections are
    // completed. Note that browsers may leave a connection open for
    // several minutes.
-   std::this_thread::sleep_for(std::chrono::seconds(60));
+   std::this_thread::sleep_for(std::chrono::seconds(600));
    BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
    return 0;
 }
