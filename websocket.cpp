@@ -11,6 +11,8 @@
 template<typename T>
 class WebSocket {
 public:
+   typedef boost::system::error_code error_code;
+   
    enum MessageType {
       continuation = 0x0,
       text         = 0x1,
@@ -36,19 +38,57 @@ public:
    void async_receive(boost::asio::streambuf& streambuf, ReadHandler handler) {
    }
 
-   // void handler(const error_code& error, size_t nBytes)
    template<typename ConstBufferSequence, typename WriteHandler>
    void async_send(uint8_t meta, const ConstBufferSequence& buffers, WriteHandler&& handler) {
+      auto header = std::make_shared<std::vector<char> >();
+      header->push_back(static_cast<char>(meta));
+      
+      const size_t bufferSize = boost::asio::buffer_size(buffers);
+      if (bufferSize < 126) {
+         header->push_back(static_cast<char>(bufferSize));
+      }
+      else if (bufferSize < 65536) {
+         header->push_back(static_cast<char>(126));
+         header->push_back(static_cast<char>((bufferSize >> 8) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 0) & 0xff));
+      }
+      else {
+         header->push_back(static_cast<char>(127));
+         header->push_back(static_cast<char>((bufferSize >> 56) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 48) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 40) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 32) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 24) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >> 16) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >>  8) & 0xff));
+         header->push_back(static_cast<char>((bufferSize >>  0) & 0xff));
+      }
+
+      boost::asio::async_write(
+         *stream(), boost::asio::buffer(*header),
+         [=](const error_code& error, size_t) {
+            if (error) {
+               handler(error, 0);
+               return;
+            }
+
+            header.get();
+            boost::asio::async_write(
+               *stream(), buffers,
+               [=](const error_code& error, size_t) {
+                  if (error) {
+                     handler(error, 0);
+                     return;
+                  }
+
+                  handler(error, bufferSize);
+               });
+         });
    }
 
 private:
    std::shared_ptr<T> stream_;
 };
-
-static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
-   BOOST_LOG_TRIVIAL(info) << "creating WebSocket";
-   WebSocket<chunky::TCP> ws(tcp);
-}
 
 template<typename T>
 static std::string encode64(T bgn, T end) {
@@ -57,6 +97,25 @@ static std::string encode64(T bgn, T end) {
     std::string result((Iterator(bgn)), (Iterator(end)));
     result.resize((result.size() + 3) & ~3, '=');
     return result;
+}
+
+static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
+   typedef WebSocket<chunky::TCP> WS;
+   
+   BOOST_LOG_TRIVIAL(info) << "creating WebSocket";
+   auto ws = std::make_shared<WS>(tcp);
+
+   static const std::string s("how now brown cow");
+   ws->async_send(
+      WS::fin | WS::text, boost::asio::buffer(s),
+      [=](const boost::system::error_code& error, size_t) {
+         if (error) {
+            BOOST_LOG_TRIVIAL(error) << error.message();
+            return;
+         }
+
+         ws.get();
+      });
 }
 
 int main() {
