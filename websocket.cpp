@@ -29,15 +29,6 @@ public:
 
    std::shared_ptr<T> stream() { return stream_; }
    
-   // void handler(const error_code& error, uint8_t code, size_t nBytes)
-   template<typename MutableBufferSequence, typename ReadHandler>
-   void async_receive(const MutableBufferSequence& buffers, ReadHandler handler) {
-   }
-
-   template<typename ReadHandler>
-   void async_receive(boost::asio::streambuf& streambuf, ReadHandler handler) {
-   }
-
    void read_frame() {
       auto header = std::make_shared<std::array<char, 14> >();
       boost::asio::async_read(
@@ -119,9 +110,17 @@ public:
    
    template<typename ConstBufferSequence, typename WriteHandler>
    void async_send(uint8_t meta, const ConstBufferSequence& buffers, WriteHandler&& handler) {
+      // Build the frame header.
       auto header = std::make_shared<std::vector<char> >(generate_header(meta, buffers));
+
+      // Assemble the frame from the header and payload.
+      std::vector<boost::asio::const_buffer> frame;
+      frame.emplace_back(header->data(), header->size());
+      for (const auto& buffer : buffers)
+         frame.emplace_back(buffer);
+      
       boost::asio::async_write(
-         *stream(), boost::asio::buffer(*header),
+         *stream(), frame,
          [=](const error_code& error, size_t) {
             if (error) {
                handler(error, 0);
@@ -129,16 +128,7 @@ public:
             }
 
             header.get();
-            boost::asio::async_write(
-               *stream(), buffers,
-               [=](const error_code& error, size_t) {
-                  if (error) {
-                     handler(error, 0);
-                     return;
-                  }
-
-                  handler(error, boost::asio::buffer_size(buffers));
-               });
+            handler(error, boost::asio::buffer_size(buffers));
          });
    }
 
