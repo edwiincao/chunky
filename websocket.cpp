@@ -8,12 +8,11 @@
 
 #include "chunky.hpp"
 
-template<typename T>
 class WebSocket {
 public:
-   typedef boost::system::error_code error_code;
+   typedef std::vector<char> FramePayload;
    
-   enum MessageType {
+   enum FrameType {
       continuation = 0x0,
       text         = 0x1,
       binary       = 0x2,
@@ -22,24 +21,35 @@ public:
       pong         = 0xa,
       fin          = 0x80
    };
-      
-   WebSocket(const std::shared_ptr<T>& stream)
-      : stream_(stream) {
+
+   // Receive frames from the stream continuously.
+   template<typename Stream, typename ReadHandler>
+   static void receive_frames(const std::shared_ptr<Stream>& stream, ReadHandler&& handler) {
+      receive_frame(
+         stream,
+         [=](const boost::system::error_code& error,
+             uint8_t type,
+             const std::shared_ptr<FramePayload>& payload) {
+            if (error) {
+               handler(error, 0, std::shared_ptr<FramePayload>());
+               return;
+            }
+
+            handler(boost::system::error_code(), type, payload);
+            receive_frames(stream, handler);
+         });
    }
 
-   virtual ~WebSocket() {
-   }
-   
-   std::shared_ptr<T> stream() { return stream_; }
-   
-   void service() {
+   // Receive frame asynchronously.
+   template<typename Stream, typename ReadHandler>
+   static void receive_frame(const std::shared_ptr<Stream>& stream, ReadHandler&& handler) {
       // Read the first two bytes of the frame header.
       auto header = std::make_shared<std::array<char, 14> >();
       boost::asio::async_read(
-         *stream(), boost::asio::mutable_buffers_1(&(*header)[0], 2),
+         *stream, boost::asio::mutable_buffers_1(&(*header)[0], 2),
          [=](const boost::system::error_code& error, size_t) {
             if (error) {
-               handle_error(error);
+               handler(error, 0, std::shared_ptr<FramePayload>());
                return;
             }
 
@@ -64,10 +74,10 @@ public:
 
             // Read the payload size and mask.
             boost::asio::async_read(
-               *stream(), boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
+               *stream, boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
                [=](const boost::system::error_code& error, size_t) mutable {
                   if (error) {
-                     handle_error(error);
+                     handler(error, 0, std::shared_ptr<FramePayload>());
                      return;
                   }
                   
@@ -77,12 +87,12 @@ public:
                   }
 
                   // Read the payload itself.
-                  auto payload = std::make_shared<std::vector<char> >(nPayloadBytes);
+                  auto payload = std::make_shared<FramePayload>(nPayloadBytes);
                   boost::asio::async_read(
-                     *stream(), boost::asio::buffer(*payload),
+                     *stream, boost::asio::buffer(*payload),
                      [=](const boost::system::error_code& error, size_t) {
                         if (error) {
-                           handle_error(error);
+                           handler(error, 0, std::shared_ptr<FramePayload>());
                            return;
                         }
 
@@ -93,44 +103,21 @@ public:
 
                         // Dispatch the frame.
                         const uint8_t type = static_cast<uint8_t>((*header)[0]);
-                        service();
-                        handle_frame(type, payload);
+                        handler(boost::system::error_code(), type, payload);
                      });
                });
          });
    }
 
-   virtual void handle_error(const boost::system::error_code& error) {
-      BOOST_LOG_TRIVIAL(error) << error.message();
-   }
-   
-   virtual bool handle_frame(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
-      if (type == (fin | ping)) {
-         // Send pong.
-         send_frame(
-            fin | pong, boost::asio::buffer(*payload),
-            [=](const boost::system::error_code& error, size_t) {
-               if (error) {
-                  handle_error(error);
-                  return;
-               }
-
-               payload.get();
-            });
-         return true;
-      }
-
-      BOOST_LOG_TRIVIAL(info) << boost::format("0x%0x %s")
-         % static_cast<unsigned int>(type)
-         % std::string(payload->begin(), payload->end());
-      return false;
-   }
-
    // Send frame asynchronously.
-   template<typename ConstBufferSequence, typename WriteHandler>
-   void send_frame(uint8_t type, const ConstBufferSequence& buffers, WriteHandler&& handler) {
+   template<typename Stream, typename ConstBufferSequence, typename WriteHandler>
+   static void send_frame(
+      const std::shared_ptr<Stream>& stream,
+      uint8_t type,
+      const ConstBufferSequence& buffers,
+      WriteHandler&& handler) {
       // Build the frame header.
-      auto header = std::make_shared<std::vector<char> >(build_header(type, buffers));
+      auto header = std::make_shared<FramePayload>(build_header(type, buffers));
 
       // Assemble the frame from the header and payload.
       std::vector<boost::asio::const_buffer> frame;
@@ -139,21 +126,26 @@ public:
          frame.emplace_back(buffer);
       
       boost::asio::async_write(
-         *stream(), frame,
-         [=](const error_code& error, size_t) {
+         *stream, frame,
+         [=](const boost::system::error_code& error, size_t) {
             if (error) {
-               handler(error, 0);
+               handler(error);
                return;
             }
 
             header.get();
-            handler(error, boost::asio::buffer_size(buffers));
+            stream.get();
+            handler(error);
          });
    }
 
    // Send frame synchronously returning error via error_code argument.
-   template<typename ConstBufferSequence>
-   size_t send_frame(uint8_t type, const ConstBufferSequence& buffers, error_code& error) {
+   template<typename Stream, typename ConstBufferSequence>
+   static void send_frame(
+      const std::shared_ptr<Stream>& stream,
+      uint8_t type,
+      const ConstBufferSequence& buffers,
+      boost::system::error_code& error) {
       auto header = build_header(type, buffers);
 
       // Assemble the frame from the header and payload.
@@ -162,26 +154,45 @@ public:
       for (const auto& buffer : buffers)
          frame.emplace_back(buffer);
       
-      boost::asio::write(*stream(), frame, error);
-      return error ? 0 : boost::asio::buffer_size(buffers);
+      boost::asio::write(*stream, frame, error);
    }
    
    // Send frame synchronously returning error via exception.
-   template<typename ConstBufferSequence>
-   size_t send_frame(uint8_t type, const ConstBufferSequence& buffers) {
+   template<typename Stream, typename ConstBufferSequence>
+   static void send_frame(
+      const std::shared_ptr<Stream>& stream,
+      uint8_t type,
+      const ConstBufferSequence& buffers) {
       boost::system::error_code error;
-      size_t nBytes = send_frame(type, buffers, error);
+      send_frame(stream, type, buffers, error);
       if (error)
          throw boost::system::system_error(error);
-      return nBytes;
+   }
+
+   // Transform Sec-WebSocket-Key value to Sec-WebSocket-Accept value.
+   static std::string process_key(const std::string& key) {
+      EVP_MD_CTX sha1;
+      EVP_DigestInit(&sha1, EVP_sha1());
+      EVP_DigestUpdate(&sha1, key.data(), key.size());
+
+      static const std::string suffix("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+      EVP_DigestUpdate(&sha1, suffix.data(), suffix.size());
+
+      unsigned int digestSize;
+      unsigned char digest[EVP_MAX_MD_SIZE];
+      EVP_DigestFinal(&sha1, digest, &digestSize);
+
+      using namespace boost::archive::iterators;
+      typedef base64_from_binary<transform_width<const unsigned char*, 6, 8>> Iterator;
+      std::string result((Iterator(digest)), (Iterator(digest + digestSize)));
+      result.resize((result.size() + 3) & ~size_t(3), '=');
+      return result;
    }
    
 private:
-   std::shared_ptr<T> stream_;
-   
    template<typename ConstBufferSequence>
-   std::vector<char> build_header(uint8_t type, const ConstBufferSequence& buffers) {
-      std::vector<char> header;
+   static FramePayload build_header(uint8_t type, const ConstBufferSequence& buffers) {
+      FramePayload header;
       header.push_back(static_cast<char>(type));
       
       const size_t bufferSize = boost::asio::buffer_size(buffers);
@@ -209,37 +220,33 @@ private:
    }
 };
 
-template<typename T>
-static std::string encode64(T bgn, T end) {
-    using namespace boost::archive::iterators;
-    typedef base64_from_binary<transform_width<T, 6, 8>> Iterator;
-    std::string result((Iterator(bgn)), (Iterator(end)));
-    result.resize((result.size() + 3) & ~size_t(3), '=');
-    return result;
-}
-
 static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
-   typedef WebSocket<chunky::TCP> WS;
-   
-   BOOST_LOG_TRIVIAL(info) << "creating WebSocket";
-   auto ws = std::make_shared<WS>(tcp);
-
-   boost::system::error_code error;
-   ws->send_frame(WS::fin | WS::text, boost::asio::buffer(std::string("synchronous send")));
+   WebSocket::send_frame(
+      tcp, WebSocket::fin | WebSocket::text,
+      boost::asio::buffer(std::string("synchronous send")));
    
    static const std::string s("asynchronous send");
-   ws->send_frame(
-      WS::fin | WS::text, boost::asio::buffer(s),
-      [=](const boost::system::error_code& error, size_t) {
+   WebSocket::send_frame(
+      tcp, WebSocket::fin | WebSocket::text, boost::asio::buffer(s),
+      [=](const boost::system::error_code& error) {
+         if (error) {
+            BOOST_LOG_TRIVIAL(error) << error.message();
+            return;
+         }
+      });
+
+   WebSocket::receive_frames(
+      tcp,
+      [=](const boost::system::error_code& error,
+          uint8_t type,
+          const std::shared_ptr<WebSocket::FramePayload>& payload) {
          if (error) {
             BOOST_LOG_TRIVIAL(error) << error.message();
             return;
          }
 
-         ws.get();
+         BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
       });
-
-   ws->service();
    
    while (true)
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -289,25 +296,17 @@ int main() {
                % value.first
                % value.second;
 
-         http->response_status() = 101; // Switching Protocols
-         http->response_headers()["Upgrade"] = "websocket";
-         http->response_headers()["Connection"] = "Upgrade";
-
-         // Compute Sec-WebSocket-Accept header value.
-         EVP_MD_CTX sha1;
-         EVP_DigestInit(&sha1, EVP_sha1());
          auto key = http->request_headers().find("Sec-WebSocket-Key");
-         if (key != http->request_headers().end())
-            EVP_DigestUpdate(&sha1, key->second.data(), key->second.size());
-
-         static const std::string suffix("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-         EVP_DigestUpdate(&sha1, suffix.data(), suffix.size());
-
-         unsigned int digestSize;
-         unsigned char digest[EVP_MAX_MD_SIZE];
-         EVP_DigestFinal(&sha1, digest, &digestSize);
-         
-         http->response_headers()["Sec-WebSocket-Accept"] = encode64(digest, digest + digestSize);
+         if (key != http->request_headers().end()) {
+            http->response_status() = 101; // Switching Protocols
+            http->response_headers()["Upgrade"] = "websocket";
+            http->response_headers()["Connection"] = "Upgrade";
+            http->response_headers()["Sec-WebSocket-Accept"] = WebSocket::process_key(key->second);
+         }
+         else {
+            http->response_status() = 400; // Bad Request
+            http->response_headers()["Connection"] = "close";
+         }
 
          boost::system::error_code error;
          http->finish();
