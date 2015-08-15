@@ -27,18 +27,23 @@ public:
       : stream_(stream) {
    }
 
+   virtual ~WebSocket() {
+   }
+   
    std::shared_ptr<T> stream() { return stream_; }
    
-   void read_frame() {
+   void service() {
+      // Read the first two bytes of the frame header.
       auto header = std::make_shared<std::array<char, 14> >();
       boost::asio::async_read(
          *stream(), boost::asio::mutable_buffers_1(&(*header)[0], 2),
          [=](const boost::system::error_code& error, size_t) {
             if (error) {
-               BOOST_LOG_TRIVIAL(error) << error.message();
+               handle_error(error);
                return;
             }
 
+            // Determine the payload size format.
             size_t nLengthBytes = 0;
             size_t nPayloadBytes = (*header)[1] & 0x7f;
             switch (nPayloadBytes) {
@@ -52,15 +57,17 @@ public:
                break;
             }
 
+            // Configure the mask.
             const size_t nMaskBytes = ((*header)[1] & 0x80) ? 4 : 0;
             char* mask = &(*header)[2 + nLengthBytes];
             std::fill(mask, mask + nMaskBytes, 0);
-      
+
+            // Read the payload size and mask.
             boost::asio::async_read(
                *stream(), boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
                [=](const boost::system::error_code& error, size_t) mutable {
                   if (error) {
-                     BOOST_LOG_TRIVIAL(error) << error.message();
+                     handle_error(error);
                      return;
                   }
                   
@@ -69,49 +76,61 @@ public:
                      nPayloadBytes |= static_cast<uint8_t>((*header)[2 + i]);
                   }
 
+                  // Read the payload itself.
                   auto payload = std::make_shared<std::vector<char> >(nPayloadBytes);
                   boost::asio::async_read(
                      *stream(), boost::asio::buffer(*payload),
                      [=](const boost::system::error_code& error, size_t) {
                         if (error) {
-                           BOOST_LOG_TRIVIAL(error) << error.message();
+                           handle_error(error);
                            return;
                         }
 
+                        // Unmask the payload buffer.
                         size_t cindex = 0;
                         for (char& c : *payload)
                            c ^= mask[cindex++ & 0x3];
 
-                        handle_frame((*header)[0], std::move(payload));
+                        // Dispatch the frame.
+                        const uint8_t type = static_cast<uint8_t>((*header)[0]);
+                        service();
+                        handle_frame(type, payload);
                      });
                });
          });
-
    }
 
-   void handle_ping(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
+   virtual void handle_error(const boost::system::error_code& error) {
+      BOOST_LOG_TRIVIAL(error) << error.message();
    }
    
-   void handle_close(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
-   }
-   
-   void handle_frame(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
-      if (type == (fin | ping))
-         handle_ping(type, payload);
-      else if (type == (fin | close))
-         handle_close(type, payload);
+   virtual bool handle_frame(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
+      if (type == (fin | ping)) {
+         // Send pong.
+         send_frame(
+            fin | pong, boost::asio::buffer(*payload),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  handle_error(error);
+                  return;
+               }
+
+               payload.get();
+            });
+         return true;
+      }
 
       BOOST_LOG_TRIVIAL(info) << boost::format("0x%0x %s")
          % static_cast<unsigned int>(type)
          % std::string(payload->begin(), payload->end());
-      
-      read_frame();
+      return false;
    }
-   
+
+   // Send frame asynchronously.
    template<typename ConstBufferSequence, typename WriteHandler>
-   void async_send(uint8_t meta, const ConstBufferSequence& buffers, WriteHandler&& handler) {
+   void send_frame(uint8_t type, const ConstBufferSequence& buffers, WriteHandler&& handler) {
       // Build the frame header.
-      auto header = std::make_shared<std::vector<char> >(generate_header(meta, buffers));
+      auto header = std::make_shared<std::vector<char> >(build_header(type, buffers));
 
       // Assemble the frame from the header and payload.
       std::vector<boost::asio::const_buffer> frame;
@@ -132,24 +151,38 @@ public:
          });
    }
 
+   // Send frame synchronously returning error via error_code argument.
    template<typename ConstBufferSequence>
-   size_t send(uint8_t meta, const ConstBufferSequence& buffers, error_code& error) {
-      auto header = generate_header(meta, buffers);
-      boost::asio::write(*stream(), boost::asio::buffer(header), error);
-      if (error)
-         return 0;
+   size_t send_frame(uint8_t type, const ConstBufferSequence& buffers, error_code& error) {
+      auto header = build_header(type, buffers);
 
-      return boost::asio::write(*stream(), buffers, error);
+      // Assemble the frame from the header and payload.
+      std::vector<boost::asio::const_buffer> frame;
+      frame.emplace_back(header.data(), header.size());
+      for (const auto& buffer : buffers)
+         frame.emplace_back(buffer);
+      
+      boost::asio::write(*stream(), frame, error);
+      return error ? 0 : boost::asio::buffer_size(buffers);
+   }
+   
+   // Send frame synchronously returning error via exception.
+   template<typename ConstBufferSequence>
+   size_t send_frame(uint8_t type, const ConstBufferSequence& buffers) {
+      boost::system::error_code error;
+      size_t nBytes = send_frame(type, buffers, error);
+      if (error)
+         throw boost::system::system_error(error);
+      return nBytes;
    }
    
 private:
    std::shared_ptr<T> stream_;
-   boost::asio::streambuf streambuf_;
    
    template<typename ConstBufferSequence>
-   std::vector<char> generate_header(uint8_t meta, const ConstBufferSequence& buffers) {
+   std::vector<char> build_header(uint8_t type, const ConstBufferSequence& buffers) {
       std::vector<char> header;
-      header.push_back(static_cast<char>(meta));
+      header.push_back(static_cast<char>(type));
       
       const size_t bufferSize = boost::asio::buffer_size(buffers);
       if (bufferSize < 126) {
@@ -192,10 +225,10 @@ static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
    auto ws = std::make_shared<WS>(tcp);
 
    boost::system::error_code error;
-   ws->send(WS::fin | WS::text, boost::asio::buffer(std::string("synchronous send")), error);
+   ws->send_frame(WS::fin | WS::text, boost::asio::buffer(std::string("synchronous send")));
    
    static const std::string s("asynchronous send");
-   ws->async_send(
+   ws->send_frame(
       WS::fin | WS::text, boost::asio::buffer(s),
       [=](const boost::system::error_code& error, size_t) {
          if (error) {
@@ -206,7 +239,7 @@ static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
          ws.get();
       });
 
-   ws->read_frame();
+   ws->service();
    
    while (true)
       std::this_thread::sleep_for(std::chrono::seconds(1));
