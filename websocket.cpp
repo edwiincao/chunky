@@ -29,7 +29,7 @@ public:
 
    std::shared_ptr<T> stream() { return stream_; }
    
-   // void handler(const error_code& error, uint8_t meta, size_t nBytes)
+   // void handler(const error_code& error, uint8_t code, size_t nBytes)
    template<typename MutableBufferSequence, typename ReadHandler>
    void async_receive(const MutableBufferSequence& buffers, ReadHandler handler) {
    }
@@ -38,6 +38,85 @@ public:
    void async_receive(boost::asio::streambuf& streambuf, ReadHandler handler) {
    }
 
+   void read_frame() {
+      auto header = std::make_shared<std::array<char, 14> >();
+      boost::asio::async_read(
+         *stream(), boost::asio::mutable_buffers_1(&(*header)[0], 2),
+         [=](const boost::system::error_code& error, size_t) {
+            if (error) {
+               BOOST_LOG_TRIVIAL(error) << error.message();
+               return;
+            }
+
+            size_t nLengthBytes = 0;
+            size_t nPayloadBytes = (*header)[1] & 0x7f;
+            switch (nPayloadBytes) {
+            case 126:
+               nLengthBytes = 2;
+               nPayloadBytes = 0;
+               break;
+            case 127:
+               nLengthBytes = 4;
+               nPayloadBytes = 0;
+               break;
+            }
+
+            const size_t nMaskBytes = ((*header)[1] & 0x80) ? 4 : 0;
+            char* mask = &(*header)[2 + nLengthBytes];
+            std::fill(mask, mask + nMaskBytes, 0);
+      
+            boost::asio::async_read(
+               *stream(), boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
+               [=](const boost::system::error_code& error, size_t) mutable {
+                  if (error) {
+                     BOOST_LOG_TRIVIAL(error) << error.message();
+                     return;
+                  }
+                  
+                  for (size_t i = 0; i < nLengthBytes; ++i) {
+                     nPayloadBytes <<= 8;
+                     nPayloadBytes |= static_cast<uint8_t>((*header)[2 + i]);
+                  }
+
+                  auto payload = std::make_shared<std::vector<char> >(nPayloadBytes);
+                  boost::asio::async_read(
+                     *stream(), boost::asio::buffer(*payload),
+                     [=](const boost::system::error_code& error, size_t) {
+                        if (error) {
+                           BOOST_LOG_TRIVIAL(error) << error.message();
+                           return;
+                        }
+
+                        size_t cindex = 0;
+                        for (char& c : *payload)
+                           c ^= mask[cindex++ & 0x3];
+
+                        handle_frame((*header)[0], std::move(payload));
+                     });
+               });
+         });
+
+   }
+
+   void handle_ping(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
+   }
+   
+   void handle_close(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
+   }
+   
+   void handle_frame(uint8_t type, const std::shared_ptr<std::vector<char> >& payload) {
+      if (type == (fin | ping))
+         handle_ping(type, payload);
+      else if (type == (fin | close))
+         handle_close(type, payload);
+
+      BOOST_LOG_TRIVIAL(info) << boost::format("0x%0x %s")
+         % static_cast<unsigned int>(type)
+         % std::string(payload->begin(), payload->end());
+      
+      read_frame();
+   }
+   
    template<typename ConstBufferSequence, typename WriteHandler>
    void async_send(uint8_t meta, const ConstBufferSequence& buffers, WriteHandler&& handler) {
       auto header = std::make_shared<std::vector<char> >(generate_header(meta, buffers));
@@ -75,7 +154,8 @@ public:
    
 private:
    std::shared_ptr<T> stream_;
-
+   boost::asio::streambuf streambuf_;
+   
    template<typename ConstBufferSequence>
    std::vector<char> generate_header(uint8_t meta, const ConstBufferSequence& buffers) {
       std::vector<char> header;
@@ -111,7 +191,7 @@ static std::string encode64(T bgn, T end) {
     using namespace boost::archive::iterators;
     typedef base64_from_binary<transform_width<T, 6, 8>> Iterator;
     std::string result((Iterator(bgn)), (Iterator(end)));
-    result.resize((result.size() + 3) & ~3, '=');
+    result.resize((result.size() + 3) & ~size_t(3), '=');
     return result;
 }
 
@@ -135,6 +215,11 @@ static void handle_connection(const std::shared_ptr<chunky::TCP>& tcp) {
 
          ws.get();
       });
+
+   ws->read_frame();
+   
+   while (true)
+      std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 int main() {
@@ -151,9 +236,11 @@ int main() {
             "  var socket = new WebSocket('ws://localhost:8800/ws');\n"
             "  socket.onopen = function() {\n"
             "    console.log('onopen')\n;"
+            "    socket.send('from onopen');\n"   
             "  }\n"
             "  socket.onmessage = function(e) {\n"
             "    console.log(e.data);\n"
+            "    socket.send('from onmessage');\n"   
             "  }\n"
             "  socket.onerror = function(error) {\n"
             "    console.log(error);\n"
