@@ -242,31 +242,40 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
             return;
          }
 
-         switch(type & 0x7f) {
-         case WebSocket::continuation:
-         case WebSocket::text:
-         case WebSocket::binary:
-            BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
-            if (*nRepliesRemaining) {
-               WebSocket::send_frame(
-                  tcp,
-                  WebSocket::fin | WebSocket::text,
-                  boost::asio::buffer(std::to_string(*nRepliesRemaining)));
-               --*nRepliesRemaining;
+         // The following code uses the synchronous API with
+         // exceptions to minimize example size. Using the
+         // asynchronous API may provide better throughput but is
+         // harder to follow.
+         try {
+            switch(type & 0x7f) {
+            case WebSocket::continuation:
+            case WebSocket::text:
+            case WebSocket::binary:
+               BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
+               if (*nRepliesRemaining) {
+                  WebSocket::send_frame(
+                     tcp,
+                     WebSocket::fin | WebSocket::text,
+                     boost::asio::buffer(std::to_string(*nRepliesRemaining)));
+                  --*nRepliesRemaining;
+               }
+               else
+                  WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
+               break;
+            case WebSocket::ping:
+               BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
+               WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
+               break;
+            case WebSocket::pong:
+               BOOST_LOG_TRIVIAL(info) << "WebSocket::pong";
+               break;
+            case WebSocket::close:
+               BOOST_LOG_TRIVIAL(info) << "WebSocket::close";
+               break;
             }
-            else
-               WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
-            break;
-         case WebSocket::ping:
-            BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
-            WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
-            break;
-         case WebSocket::pong:
-            BOOST_LOG_TRIVIAL(info) << "WebSocket::pong";
-            break;
-         case WebSocket::close:
-            BOOST_LOG_TRIVIAL(info) << "WebSocket::close";
-            break;
+         }
+         catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << e.what();
          }
       });
 }
@@ -290,14 +299,14 @@ int main() {
             "    socket.send('from onopen');\n"   
             "  }\n"
             "  socket.onmessage = function(e) {\n"
-            "    console.log('onmessage' + e.data);\n"
+            "    console.log('onmessage ' + e.data);\n"
             "    socket.send('from onmessage');\n"   
             "  }\n"
             "  socket.onclose = function(error) {\n"
             "    console.log('onclose');\n"
             "  }\n"
             "  socket.onerror = function(error) {\n"
-            "    console.log('onerror' + error);\n"
+            "    console.log('onerror ' + error);\n"
             "  }\n"
             "</script>\n";
          
