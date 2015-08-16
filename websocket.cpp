@@ -254,7 +254,9 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
    // Start with a fragmented message.
    WebSocket::send_frame(tcp, WebSocket::text, boost::asio::buffer(std::string("frag")));
    WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string("ment")));
-   WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::continuation, boost::asio::buffer(std::string("ed")));
+   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string("ation")));
+   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string(" test")));
+   WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::continuation, boost::asio::null_buffers());
 
    // Iterate through the array of test messages with this index.
    auto index = std::make_shared<int>(0);
@@ -270,10 +272,6 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
             return;
          }
 
-         // The following code uses the synchronous API with
-         // exceptions to minimize example size. Using the
-         // asynchronous API may provide better throughput but is
-         // harder to follow.
          try {
             switch(type & 0x7f) {
             case WebSocket::continuation:
@@ -282,7 +280,7 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
                BOOST_LOG_TRIVIAL(info) << boost::format("%02x %6d %s")
                   % static_cast<unsigned int>(type)
                   % payload->size()
-                  % std::string(payload->begin(), payload->begin() + std::min(payload->size(), size_t(16)));
+                  % std::string(payload->begin(), payload->begin() + std::min(payload->size(), size_t(20)));
 
                // Send the next test message (or close) when the
                // incoming message is complete.
@@ -291,7 +289,13 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
                      WebSocket::send_frame(
                         tcp,
                         WebSocket::fin | WebSocket::text,
-                        boost::asio::buffer(messages[(*index)++]));
+                        boost::asio::buffer(messages[(*index)++]),
+                        [](const boost::system::error_code& error) {
+                           if (error) {
+                              BOOST_LOG_TRIVIAL(error) << error.message();
+                              return;
+                           }
+                        });
                   }
                   else
                      WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
