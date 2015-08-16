@@ -67,7 +67,7 @@ public:
                nPayloadBytes = 0;
                break;
             case 127:
-               nLengthBytes = 4;
+               nLengthBytes = 8;
                nPayloadBytes = 0;
                break;
             }
@@ -228,9 +228,37 @@ private:
 // This is a sample WebSocket session function. It manages one
 // connection over its stream argument.
 static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
-   // Reply to incoming frames a fixed number of times, then close.
-   auto nRepliesRemaining = std::make_shared<int>(5);
+   static const std::vector<std::string> messages = {
+      std::string(""),
+      std::string(1, 'A'),
+      std::string(2, 'B'),
+      std::string(4, 'C'),
+      std::string(8, 'D'),
+      std::string(16, 'E'),
+      std::string(32, 'F'),
+      std::string(64, 'G'),
+      std::string(128, 'H'),
+      std::string(256, 'I'),
+      std::string(512, 'J'),
+      std::string(1024, 'K'),
+      std::string(2048, 'L'),
+      std::string(4096, 'M'),
+      std::string(8192, 'N'),
+      std::string(16384, 'O'),
+      std::string(32768, 'P'),
+      std::string(65536, 'Q'),
+      std::string(131072, 'R'),
+      std::string(262144, 'S'),
+   };
 
+   // Start with a fragmented message.
+   WebSocket::send_frame(tcp, WebSocket::text, boost::asio::buffer(std::string("frag")));
+   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string("ment")));
+   WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::continuation, boost::asio::buffer(std::string("ed")));
+
+   // Iterate through the array of test messages with this index.
+   auto index = std::make_shared<int>(0);
+      
    // Receive frames until an error or close.
    WebSocket::receive_frames(
       tcp,
@@ -251,16 +279,23 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
             case WebSocket::continuation:
             case WebSocket::text:
             case WebSocket::binary:
-               BOOST_LOG_TRIVIAL(info) << std::string(payload->begin(), payload->end());
-               if (*nRepliesRemaining) {
-                  WebSocket::send_frame(
-                     tcp,
-                     WebSocket::fin | WebSocket::text,
-                     boost::asio::buffer(std::to_string(*nRepliesRemaining)));
-                  --*nRepliesRemaining;
+               BOOST_LOG_TRIVIAL(info) << boost::format("%02x %6d %s")
+                  % static_cast<unsigned int>(type)
+                  % payload->size()
+                  % std::string(payload->begin(), payload->begin() + std::min(payload->size(), size_t(16)));
+
+               // Send the next test message (or close) when the
+               // incoming message is complete.
+               if (type & WebSocket::fin) {
+                  if (*index < messages.size()) {
+                     WebSocket::send_frame(
+                        tcp,
+                        WebSocket::fin | WebSocket::text,
+                        boost::asio::buffer(messages[(*index)++]));
+                  }
+                  else
+                     WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
                }
-               else
-                  WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
                break;
             case WebSocket::ping:
                BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
@@ -288,6 +323,7 @@ int main() {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
+         // The client will simply echo messages the server sends.
          static const std::string html =
             "<!DOCTYPE html>"
             "<title>chunky WebSocket</title>"
@@ -296,11 +332,10 @@ int main() {
             "  var socket = new WebSocket('ws://' + location.host + '/ws');\n"
             "  socket.onopen = function() {\n"
             "    console.log('onopen')\n;"
-            "    socket.send('from onopen');\n"   
             "  }\n"
             "  socket.onmessage = function(e) {\n"
-            "    console.log('onmessage ' + e.data);\n"
-            "    socket.send('from onmessage');\n"   
+            "    console.log('onmessage');\n"
+            "    socket.send(e.data);\n"   
             "  }\n"
             "  socket.onclose = function(error) {\n"
             "    console.log('onclose');\n"
