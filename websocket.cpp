@@ -33,13 +33,13 @@ public:
          stream,
          [=, &stream](const boost::system::error_code& error,
              uint8_t type,
-             const std::shared_ptr<FramePayload>& payload) {
+             FramePayload&& payload) {
             if (error) {
-               handler(error, 0, std::shared_ptr<FramePayload>());
+               handler(error, 0, FramePayload());
                return;
             }
 
-            handler(boost::system::error_code(), type, payload);
+            handler(boost::system::error_code(), type, std::move(payload));
             if (type != (fin | close))
                receive_frames(stream, handler);
          });
@@ -54,7 +54,7 @@ public:
          stream, boost::asio::mutable_buffers_1(&(*header)[0], 2),
          [=, &stream](const boost::system::error_code& error, size_t) {
             if (error) {
-               handler(error, 0, std::shared_ptr<FramePayload>());
+               handler(error, 0, FramePayload());
                return;
             }
 
@@ -82,7 +82,7 @@ public:
                stream, boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
                [=, &stream](const boost::system::error_code& error, size_t) mutable {
                   if (error) {
-                     handler(error, 0, std::shared_ptr<FramePayload>());
+                     handler(error, 0, FramePayload());
                      return;
                   }
                   
@@ -97,7 +97,7 @@ public:
                      stream, boost::asio::buffer(*payload),
                      [=](const boost::system::error_code& error, size_t) {
                         if (error) {
-                           handler(error, 0, std::shared_ptr<FramePayload>());
+                           handler(error, 0, FramePayload());
                            return;
                         }
 
@@ -108,7 +108,7 @@ public:
 
                         // Dispatch the frame.
                         const uint8_t type = static_cast<uint8_t>((*header)[0]);
-                        handler(boost::system::error_code(), type, payload);
+                        handler(boost::system::error_code(), type, std::move(*payload));
                      });
                });
          });
@@ -265,7 +265,7 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
       *tcp,
       [=](const boost::system::error_code& error,
           uint8_t type,
-          const std::shared_ptr<WebSocket::FramePayload>& payload) {
+          WebSocket::FramePayload&& payload) {
          if (error) {
             BOOST_LOG_TRIVIAL(error) << error.message();
             return;
@@ -278,8 +278,8 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
             case WebSocket::binary:
                BOOST_LOG_TRIVIAL(info) << boost::format("%02x %6d %s")
                   % static_cast<unsigned int>(type)
-                  % payload->size()
-                  % std::string(payload->begin(), payload->begin() + std::min(payload->size(), size_t(20)));
+                  % payload.size()
+                  % std::string(payload.begin(), payload.begin() + std::min(payload.size(), size_t(20)));
 
                // Send the next test message (or close) when the
                // incoming message is complete.
@@ -302,7 +302,7 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
                break;
             case WebSocket::ping:
                BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
-               WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
+               WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(payload));
                break;
             case WebSocket::pong:
                BOOST_LOG_TRIVIAL(info) << "WebSocket::pong";
