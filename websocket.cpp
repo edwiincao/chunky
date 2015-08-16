@@ -8,10 +8,10 @@
 
 #include "chunky.hpp"
 
-// This is a simple implementation of the WebSocket frame protocol. It
-// can be used to communicate with a WebSocket client after a
-// successful handshake. The class is stateless, so all methods are
-// static and require a stream argument.
+// This is a simple implementation of the WebSocket frame protocol for
+// a server. It can be used to communicate with a WebSocket client
+// after a successful handshake. The class is stateless, so all
+// methods are static and require a stream argument.
 class WebSocket {
 public:
    typedef std::vector<char> FramePayload;
@@ -28,10 +28,10 @@ public:
 
    // Receive frames from the stream continuously.
    template<typename Stream, typename ReadHandler>
-   static void receive_frames(const std::shared_ptr<Stream>& stream, ReadHandler&& handler) {
+   static void receive_frames(Stream& stream, ReadHandler&& handler) {
       receive_frame(
          stream,
-         [=](const boost::system::error_code& error,
+         [=, &stream](const boost::system::error_code& error,
              uint8_t type,
              const std::shared_ptr<FramePayload>& payload) {
             if (error) {
@@ -47,12 +47,12 @@ public:
 
    // Receive frame asynchronously.
    template<typename Stream, typename ReadHandler>
-   static void receive_frame(const std::shared_ptr<Stream>& stream, ReadHandler&& handler) {
+   static void receive_frame(Stream& stream, ReadHandler&& handler) {
       // Read the first two bytes of the frame header.
       auto header = std::make_shared<std::array<char, 14> >();
       boost::asio::async_read(
-         *stream, boost::asio::mutable_buffers_1(&(*header)[0], 2),
-         [=](const boost::system::error_code& error, size_t) {
+         stream, boost::asio::mutable_buffers_1(&(*header)[0], 2),
+         [=, &stream](const boost::system::error_code& error, size_t) {
             if (error) {
                handler(error, 0, std::shared_ptr<FramePayload>());
                return;
@@ -79,8 +79,8 @@ public:
 
             // Read the payload size and mask.
             boost::asio::async_read(
-               *stream, boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
-               [=](const boost::system::error_code& error, size_t) mutable {
+               stream, boost::asio::mutable_buffers_1(&(*header)[2], nLengthBytes + nMaskBytes),
+               [=, &stream](const boost::system::error_code& error, size_t) mutable {
                   if (error) {
                      handler(error, 0, std::shared_ptr<FramePayload>());
                      return;
@@ -94,7 +94,7 @@ public:
                   // Read the payload itself.
                   auto payload = std::make_shared<FramePayload>(nPayloadBytes);
                   boost::asio::async_read(
-                     *stream, boost::asio::buffer(*payload),
+                     stream, boost::asio::buffer(*payload),
                      [=](const boost::system::error_code& error, size_t) {
                         if (error) {
                            handler(error, 0, std::shared_ptr<FramePayload>());
@@ -117,7 +117,7 @@ public:
    // Send frame asynchronously.
    template<typename Stream, typename ConstBufferSequence, typename WriteHandler>
    static void send_frame(
-      const std::shared_ptr<Stream>& stream,
+      Stream& stream,
       uint8_t type,
       const ConstBufferSequence& buffers,
       WriteHandler&& handler) {
@@ -131,7 +131,7 @@ public:
          frame.emplace_back(buffer);
       
       boost::asio::async_write(
-         *stream, frame,
+         stream, frame,
          [=](const boost::system::error_code& error, size_t) {
             if (error) {
                handler(error);
@@ -139,7 +139,6 @@ public:
             }
 
             header.get();
-            stream.get();
             handler(error);
          });
    }
@@ -147,7 +146,7 @@ public:
    // Send frame synchronously returning error via error_code argument.
    template<typename Stream, typename ConstBufferSequence>
    static void send_frame(
-      const std::shared_ptr<Stream>& stream,
+      Stream& stream,
       uint8_t type,
       const ConstBufferSequence& buffers,
       boost::system::error_code& error) {
@@ -159,13 +158,13 @@ public:
       for (const auto& buffer : buffers)
          frame.emplace_back(buffer);
       
-      boost::asio::write(*stream, frame, error);
+      boost::asio::write(stream, frame, error);
    }
    
    // Send frame synchronously returning error via exception.
    template<typename Stream, typename ConstBufferSequence>
    static void send_frame(
-      const std::shared_ptr<Stream>& stream,
+      Stream& stream,
       uint8_t type,
       const ConstBufferSequence& buffers) {
       boost::system::error_code error;
@@ -252,18 +251,18 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
    };
 
    // Start with a fragmented message.
-   WebSocket::send_frame(tcp, WebSocket::text, boost::asio::buffer(std::string("frag")));
-   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string("ment")));
-   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string("ation")));
-   WebSocket::send_frame(tcp, WebSocket::continuation, boost::asio::buffer(std::string(" test")));
-   WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::continuation, boost::asio::null_buffers());
+   WebSocket::send_frame(*tcp, WebSocket::text, boost::asio::buffer(std::string("frag")));
+   WebSocket::send_frame(*tcp, WebSocket::continuation, boost::asio::buffer(std::string("ment")));
+   WebSocket::send_frame(*tcp, WebSocket::continuation, boost::asio::buffer(std::string("ation")));
+   WebSocket::send_frame(*tcp, WebSocket::continuation, boost::asio::buffer(std::string(" test")));
+   WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::continuation, boost::asio::null_buffers());
 
    // Iterate through the array of test messages with this index.
    auto index = std::make_shared<int>(0);
       
    // Receive frames until an error or close.
    WebSocket::receive_frames(
-      tcp,
+      *tcp,
       [=](const boost::system::error_code& error,
           uint8_t type,
           const std::shared_ptr<WebSocket::FramePayload>& payload) {
@@ -287,7 +286,7 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
                if (type & WebSocket::fin) {
                   if (*index < messages.size()) {
                      WebSocket::send_frame(
-                        tcp,
+                        *tcp,
                         WebSocket::fin | WebSocket::text,
                         boost::asio::buffer(messages[(*index)++]),
                         [](const boost::system::error_code& error) {
@@ -298,12 +297,12 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
                         });
                   }
                   else
-                     WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
+                     WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::close, boost::asio::null_buffers());
                }
                break;
             case WebSocket::ping:
                BOOST_LOG_TRIVIAL(info) << "WebSocket::ping";
-               WebSocket::send_frame(tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
+               WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::pong, boost::asio::buffer(*payload));
                break;
             case WebSocket::pong:
                BOOST_LOG_TRIVIAL(info) << "WebSocket::pong";
