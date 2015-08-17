@@ -303,6 +303,7 @@ namespace chunky {
       
       HTTPTransaction(const std::shared_ptr<T>& stream)
          : stream_(stream)
+         , streambuf_(buffer_size())
          , requestBytes_(0)
          , requestChunksPending_(false)
          , responseStatus_(0)
@@ -644,6 +645,16 @@ namespace chunky {
          return stream_;
       }
 
+      // Set or get the internal buffer size for all subsequent
+      // HTTPTransaction instances. If the request line and headers
+      // exceed this size then a read error will be returned.
+      static size_t buffer_size(size_t nBytes = 0) {
+         static size_t bufferSize = 10486376;
+         if (nBytes)
+            bufferSize = nBytes;
+         return bufferSize;
+      }
+      
       // Convert '+' to ' ' and percent decoding.
       template<typename Iterator>
       static std::string decode(Iterator&& bgn, Iterator&& end) {
