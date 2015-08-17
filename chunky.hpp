@@ -314,14 +314,27 @@ namespace chunky {
       const std::string& request_version() const { return requestVersion_; }
       const std::string& request_resource() const { return requestResource_; }
       const Headers& request_headers() const { return requestHeaders_; }
-
+      const std::string request_header(
+         const std::string& key,
+         const std::string& defaultValue = std::string()) const {
+         auto i = request_headers().find(key);
+         return i != request_headers().end() ? i->second : defaultValue;
+      }
+      
       const std::string& request_path() const { return requestPath_; }
       const std::string& request_fragment() const { return requestFragment_; }
       const Query& request_query() const { return requestQuery_; }
       
       unsigned int& response_status() { return responseStatus_; }
       Headers& response_headers() { return responseHeaders_; }
+      std::string& response_header(const std::string& key) {
+         return response_headers()[key];
+      }
+      
       Headers& response_trailers() { return responseTrailers_; }
+      std::string& response_trailer(const std::string& key) {
+         return response_trailers()[key];
+      }
 
       // Either async_finish() or finish() must be called on each
       // HTTPTransaction instance to ensure valid I/O on the stream. In
@@ -952,7 +965,7 @@ namespace chunky {
                std::tm tm = *std::gmtime(&t);
                char s[30];
                auto n = strftime(s, sizeof(s), "%a, %d %b %Y %T GMT", &tm);
-               response_headers()["Date"] = std::string(s, n);
+               response_header("Date") = std::string(s, n);
             }
 
             // RFC 2616 section 4.4:
@@ -975,7 +988,7 @@ namespace chunky {
                }
                else if (response_headers().count("content-length") == 0) {
                   responseChunked_ = true;
-                  response_headers()["Transfer-Encoding"] = "chunked";
+                  response_header("Transfer-Encoding") = "chunked";
                }
             }
 
@@ -1200,7 +1213,7 @@ namespace chunky {
       
       void default_handler(const std::shared_ptr<Transaction>& http) {
          http->response_status() = 404;
-         http->response_headers()["Content-Type"] = "text/html";
+         http->response_header("Content-Type") = "text/html";
          
          static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
          boost::asio::async_write(
