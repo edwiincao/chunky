@@ -8,10 +8,11 @@
 
 #include "chunky.hpp"
 
-// This is a simple implementation of the WebSocket frame protocol for
-// a server. It can be used to communicate with a WebSocket client
-// after a successful handshake. The class is stateless, so all
-// methods are static and require a stream argument.
+// This is a simple implementation of the WebSocket data transfer
+// protocol for a server (i.e. without outgoing masking). It can be
+// used to communicate with a WebSocket client after a successful
+// handshake. The class is stateless, so all methods are static and
+// require a stream argument.
 class WebSocket {
 public:
    typedef std::vector<char> FramePayload;
@@ -150,6 +151,7 @@ public:
       uint8_t type,
       const ConstBufferSequence& buffers,
       boost::system::error_code& error) {
+      // Build the frame header.
       auto header = build_header(type, buffers);
 
       // Assemble the frame from the header and payload.
@@ -175,6 +177,7 @@ public:
 
    // Transform Sec-WebSocket-Key value to Sec-WebSocket-Accept value.
    static std::string process_key(const std::string& key) {
+      // OpenSSL SHA1.
       EVP_MD_CTX sha1;
       EVP_DigestInit(&sha1, EVP_sha1());
       EVP_DigestUpdate(&sha1, key.data(), key.size());
@@ -186,6 +189,7 @@ public:
       unsigned char digest[EVP_MAX_MD_SIZE];
       EVP_DigestFinal(&sha1, digest, &digestSize);
 
+      // Boost base64.
       using namespace boost::archive::iterators;
       typedef base64_from_binary<transform_width<const unsigned char*, 6, 8>> Iterator;
       std::string result((Iterator(digest)), (Iterator(digest + digestSize)));
@@ -319,13 +323,15 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
 }
 
 int main() {
+   // This example uses chunky to perform the WebSocket HTTP handshake
+   // (as well as serving a sample HTML page) before handing off the
+   // stream for WebSocket data transfer. Using chunky is not actually
+   // required as this WebSocket data transfer implementation can
+   // wrap any boost::asio stream.
    chunky::SimpleHTTPServer server;
 
    // Simple web page that opens a WebSocket on the server.
    server.add_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
-         http->response_status() = 200;
-         http->response_headers()["Content-Type"] = "text/html";
-
          // The client will simply echo messages the server sends.
          static const std::string html =
             "<!DOCTYPE html>"
@@ -347,7 +353,10 @@ int main() {
             "    console.log('onerror ' + error);\n"
             "  }\n"
             "</script>\n";
-         
+
+         http->response_status() = 200;
+         http->response_headers()["Content-Type"] = "text/html";
+
          boost::system::error_code error;
          boost::asio::write(*http, boost::asio::buffer(html), error);
          if (error) {
@@ -364,11 +373,19 @@ int main() {
             % http->request_method()
             % http->request_resource();
 
+         // RFC 6455 has a lot of requirements for well-formed
+         // connection requests (e.g. Upgrade, Connection, and
+         // Sec-WebSocket-Version headers, among other things). Here
+         // we only check for Sec-WebSocket-Key.
+         //
+         // Any negotiation of subprotocols and extensions would
+         // also take place here. This example ignores them and
+         // uses the base protocol with no extensions.
          auto key = http->request_headers().find("Sec-WebSocket-Key");
          if (key != http->request_headers().end()) {
             http->response_status() = 101; // Switching Protocols
             http->response_headers()["Upgrade"] = "websocket";
-            http->response_headers()["Connection"] = "Upgrade";
+            http->response_headers()["Connection"] = "upgrade";
             http->response_headers()["Sec-WebSocket-Accept"] = WebSocket::process_key(key->second);
          }
          else {
