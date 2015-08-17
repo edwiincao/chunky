@@ -262,7 +262,7 @@ static void speak_websocket(const std::shared_ptr<chunky::TCP>& tcp) {
    WebSocket::send_frame(*tcp, WebSocket::fin | WebSocket::continuation, boost::asio::null_buffers());
 
    // Iterate through the array of test messages with this index.
-   auto index = std::make_shared<int>(0);
+   auto index = std::make_shared<unsigned int>(0U);
       
    // Receive frames until an error or close.
    WebSocket::receive_frames(

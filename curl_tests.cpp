@@ -207,7 +207,7 @@ BOOST_AUTO_TEST_CASE(AsyncContentLength) {
          auto body = std::make_shared<boost::asio::streambuf>();
          boost::asio::async_read(
             *http, *body,
-            [=](const error_code& error, size_t nBytes) {
+            [=](const error_code&, size_t) {
                std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
                BOOST_CHECK_EQUAL(s, upData);
                
@@ -279,7 +279,7 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
          auto body = std::make_shared<boost::asio::streambuf>();
          boost::asio::async_read(
             *http, *body,
-            [=](const error_code& error, size_t nBytes) {
+            [=](const error_code&, size_t) {
                std::string s(boost::asio::buffers_begin(body->data()), boost::asio::buffers_end(body->data()));
                BOOST_CHECK_EQUAL(s, upData);
                
@@ -337,11 +337,11 @@ BOOST_AUTO_TEST_CASE(AsyncChunked) {
    curl_easy_cleanup(curl);
 }
 
-static size_t writeAsyncBigCB(char *s, size_t size, size_t n, void *) {
+static size_t writeAsyncBigCB(char *, size_t size, size_t n, void *) {
    return size*n;
 }
 
-static size_t readAsyncBigCB(char *s, size_t size, size_t n, void *data) {
+static size_t readAsyncBigCB(char *, size_t size, size_t n, void *data) {
    static std::default_random_engine rd;
    size_t& nReadBytes = *static_cast<size_t*>(data);
    if (nReadBytes == 0)

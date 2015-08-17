@@ -49,7 +49,7 @@ int main() {
 
          boost::asio::async_write(
             *http, boost::asio::buffer(html),
-            [=](const boost::system::error_code& error, size_t nBytes) {
+            [=](const boost::system::error_code& error, size_t) {
                if (error) {
                   BOOST_LOG_TRIVIAL(error) << error.message();
                   return;
@@ -119,7 +119,7 @@ int main() {
          auto streambuf = std::make_shared<boost::asio::streambuf>();
          boost::asio::async_read(
             *http, *streambuf,
-            [=](const boost::system::error_code& error, size_t nBytes) {
+            [=](const boost::system::error_code& error, size_t) {
                // EOF is not an error here.
                if (error && error != make_error_code(boost::asio::error::eof)) {
                   BOOST_LOG_TRIVIAL(error) << error.message();

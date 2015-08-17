@@ -1,0 +1,23 @@
+include_HEADERS = chunky.hpp
+
+ACLOCAL_AMFLAGS = -I m4
+AM_CXXFLAGS= -Wall -Wextra -Werror
+
+AM_CPPFLAGS = -I$(top_srcdir) $(BOOST_CPPFLAGS) $(LIBCURL_CPPFLAGS) $(OPENSSL_INCLUDES)
+
+AM_LDFLAGS = $(BOOST_LOG_LDFLAGS) $(BOOST_SYSTEM_LDFLAGS) $(BOOST_UNIT_TEST_FRAMEWORK_LDFLAGS)
+AM_LDFLAGS += $(OPENSSL_LDFLAGS)
+
+LDADD = $(BOOST_LOG_LIBS) $(BOOST_SYSTEM_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIBS)
+LDADD += $(LIBCURL) $(OPENSSL_LIBS)
+
+TESTS = curl_tests
+check_PROGRAMS = curl_tests
+curl_tests_SOURCES = curl_tests.cpp
+
+noinst_PROGRAMS = simple tls websocket
+simple_SOURCES = simple.cpp
+tls_SOURCES = tls.cpp
+websocket_SOURCES = websocket.cpp
+
+EXTRA_DIST = NOTICE

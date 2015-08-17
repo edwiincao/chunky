@@ -1331,7 +1331,7 @@ namespace chunky {
                   // Cleanly terminate TLS if necessary.
                   if (error.category() == boost::asio::error::get_ssl_category()) {
                      std::shared_ptr<TLS> tls = http->stream();
-                     tls->stream().async_shutdown([=](const error_code& error) {
+                     tls->stream().async_shutdown([=](const error_code&) {
                            tls.get();
                         });
                   }
