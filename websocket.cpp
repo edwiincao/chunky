@@ -411,8 +411,8 @@ int main() {
 
    // Run the server on all IPv4 and IPv6 interfaces.
    using boost::asio::ip::tcp;
-   server.listen(tcp::endpoint(tcp::v4(), 8800));
-   server.listen(tcp::endpoint(tcp::v6(), 8800));
+   try { server.listen(tcp::endpoint(tcp::v4(), 8800)); } catch (...) {}
+   try { server.listen(tcp::endpoint(tcp::v6(), 8800)); } catch (...) {}
    server.run();
    BOOST_LOG_TRIVIAL(info) << "listening on port 8800";
    
