@@ -33,6 +33,9 @@ BOOST_SYSTEM
 BOOST_TEST
 
 LIBCURL_CHECK_CONFIG(,,, [AC_MSG_WARN('make check' requires libcurl)])
+AM_CONDITIONAL([HAS_LIBCURL], [test -n "LIBCURL"])
+
 AX_CHECK_OPENSSL(, [AC_MSG_WARN(['make check' and some samples require OpenSSL])])
+AM_CONDITIONAL([HAS_OPENSSL], [test -n "$OPENSSL_LIBS"])
 
 AC_OUTPUT(Makefile)
