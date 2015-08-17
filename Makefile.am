@@ -30,4 +30,4 @@ if HAS_OPENSSL
   websocket_SOURCES = websocket.cpp
 endif
 
-EXTRA_DIST = NOTICE
+EXTRA_DIST = COPYING INSTALL NOTICE README.md

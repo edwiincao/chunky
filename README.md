@@ -4,26 +4,26 @@ Asio](http://www.boost.org/doc/libs/1_59_0/doc/html/boost_asio.html)
 streams for creating embedded HTTP(S) servers.
 
 chunky was created primarily to provide an HTML5 interface to a C++
-application - its features for this purpose include chunked transfer
-and WebSocket hand-off. It is not recommended for handling public
-internet traffic, and may have denial-of-service or other security
-issues.
+application (e.g. a control panel); its features for this purpose
+include chunked transfer and WebSocket hand-off. It is not recommended
+for handling public internet traffic because it is not hardened
+against denial of service attacks.
 
 chunky is developed by Shoestring Research, LLC and is available under
 the [Apache License Version
 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
-## Prerequisites
-chunky requires a C++11 compiler. It relies heavily on
-[Boost](http://www.boost.org/), and linking with the Boost System
-library is always required for applications using chunky.
+## Prerequisites chunky requires a C++11 compiler and standard
+library. It relies heavily on [Boost](http://www.boost.org/) headers,
+and linking with the Boost System library is always required for
+applications using chunky.
 
 In addition, the chunky unit tests require linking with
 [Boost Log](http://www.boost.org/doc/libs/1_59_0/libs/log/doc/html/index.html),
 [Boost Test](http://www.boost.org/doc/libs/1_59_0/libs/test/doc/html/index.html),
-and [libcurl](http://curl.haxx.se/libcurl/). The TLS and WebSocket
-samples require linking with Boost Log and
-[OpenSSL](https://www.openssl.org/).
+and [libcurl](http://curl.haxx.se/libcurl/). All samples require linking
+linking with Boost Log, and the TLS and WebSocket samples additionally
+require [OpenSSL](https://www.openssl.org/).
 
 ## Basic usage
 Here is a minimal program that creates an HTTP server on port 8800:
@@ -50,6 +50,9 @@ Here is a minimal program that creates an HTTP server on port 8800:
     }
 
 ## Other examples
+All the example programs serve requests for 1 minute, then exit when
+all open connections are closed. Note that specific web browsers may
+keep idle connections open for several minutes.
 
 ### simple.cpp
 This example program demonstrates:
