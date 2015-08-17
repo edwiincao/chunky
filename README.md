@@ -13,10 +13,11 @@ chunky is developed by Shoestring Research, LLC and is available under
 the [Apache License Version
 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
-## Prerequisites chunky requires a C++11 compiler and standard
-library. It relies heavily on [Boost](http://www.boost.org/) headers,
-and linking with the Boost System library is always required for
-applications using chunky.
+## Prerequisites
+chunky requires a C++11 compiler and standard library. It relies
+heavily on [Boost](http://www.boost.org/) headers, and linking with
+the Boost System library is always required for applications using
+chunky.
 
 In addition, the chunky unit tests require linking with
 [Boost Log](http://www.boost.org/doc/libs/1_59_0/libs/log/doc/html/index.html),
