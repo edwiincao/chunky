@@ -193,18 +193,12 @@ namespace chunky {
       }
 
    protected:
-      template<typename A0>
-      Stream(A0&& a0)
-         : stream_(std::forward<A0>(a0))
+      template<typename... Args>
+      Stream(Args&&... args)
+         : stream_(std::forward<Args>(args)...)
          , strand_(stream_.get_io_service()) {
       }
 
-      template<typename A0, typename A1>
-      Stream(A0&& a0, A1&& a1)
-         : stream_(std::forward<A0>(a0), std::forward<A1>(a1))
-         , strand_(stream_.get_io_service()) {
-      }
-      
    private:
       T stream_;
       boost::asio::io_service::strand strand_;
