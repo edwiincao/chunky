@@ -45,8 +45,7 @@ Here is a minimal program that creates an HTTP server on port 8800:
        server.listen(tcp::endpoint(tcp::v4(), 8800));
        server.run();
 
-       while (true)
-          std::this_thread::sleep_for(std::chrono::seconds(1));
+       std::this_thread::sleep_for(std::chrono::seconds(60));
        return 0;
     }
 
@@ -66,8 +65,12 @@ This example program demonstrates:
 * 404 Not Found response.
 
 ### tls.cpp
-This example program demonstrates HTTP over TLS. You will need to
-put a certificate and private key into a file named `server.pem`.
+This example program demonstrates HTTP over TLS. It requires a
+certificate and private key in a file named `server.pem`. For testing
+convenience, a self-signed `server.pem` is provided in this
+distribution but please note that connecting clients will likely
+complain about an untrusted certificate that does not provide any
+real security.
 
 ### websocket.cpp
 This example program includes an implementation of the WebSocket data
