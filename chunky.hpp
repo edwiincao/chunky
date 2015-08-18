@@ -1102,7 +1102,9 @@ namespace chunky {
          if (defaultHandler)
             handlers_[""] = defaultHandler;
          else
-            handlers_[""] = std::bind(&BaseHTTPServer::default_handler, this, _1);;
+            handlers_[""] = [this](const std::shared_ptr<Transaction>& http) {
+               default_handler(http);
+            };
       }
 
       virtual ~BaseHTTPServer() {
@@ -1169,20 +1171,11 @@ namespace chunky {
    protected:
       typedef T Transport;
       
-      std::atomic<bool> running_;
-      boost::asio::io_service io_;
-      boost::asio::io_service::strand strand_;
-      std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
-      std::vector<std::thread> threads_;
-      
-      std::map<std::string, Handler> handlers_;
-      LogCallback logCallback_;
-      
       virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
          assert(strand_.running_in_this_thread());
          connect_transport(
             acceptor,
-            [&](const error_code& error, const std::shared_ptr<T>& transport) {
+            [&](const error_code& error, const std::shared_ptr<Transport>& transport) {
                if (!error) {
                   log((boost::format("connect %s:%d")
                        % transport->stream().lowest_layer().remote_endpoint().address().to_string()
@@ -1204,9 +1197,9 @@ namespace chunky {
 
       virtual void connect_transport(
          boost::asio::ip::tcp::acceptor& acceptor,
-         const std::function<void(const error_code&, const std::shared_ptr<T>&)>& handler) = 0;
+         const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) = 0;
       
-      virtual void prepare_transaction(const std::shared_ptr<T>& transport) = 0;
+      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) = 0;
 
       virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
          auto i = handlers_.find(transaction->request_path());
@@ -1216,7 +1209,7 @@ namespace chunky {
             handlers_.at(std::string())(transaction);
       }
       
-      void default_handler(const std::shared_ptr<Transaction>& http) {
+      virtual void default_handler(const std::shared_ptr<Transaction>& http) {
          http->response_status() = 404;
          http->response_header("Content-Type") = "text/html";
          
@@ -1240,7 +1233,7 @@ namespace chunky {
             });
       }
 
-      static bool keep_alive(Transaction& http) {
+      virtual bool keep_alive(Transaction& http) {
          if (http.response_status() == 101)
             return false;
          
@@ -1256,8 +1249,18 @@ namespace chunky {
              responseConnection->second == close)
             return false;
 
-         return true;
+         return running_;
       }
+
+   private:
+      std::atomic<bool> running_;
+      boost::asio::io_service io_;
+      boost::asio::io_service::strand strand_;
+      std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
+      std::vector<std::thread> threads_;
+      
+      std::map<std::string, Handler> handlers_;
+      LogCallback logCallback_;
    };
 
    class SimpleHTTPServer : public BaseHTTPServer<TCP> {
@@ -1280,9 +1283,9 @@ namespace chunky {
          std::shared_ptr<Transaction> http(
             new Transaction(transport),
             [=](Transaction* pointer) {
-               *keepalive &= running_ && keep_alive(*pointer);
+               *keepalive &= keep_alive(*pointer);
                if (*keepalive) {
-                  io_.post([=]() {
+                  get_io_service().post([=]() {
                         prepare_transaction(transport);
                      });
                }
@@ -1330,9 +1333,9 @@ namespace chunky {
          std::shared_ptr<Transaction> http(
             new Transaction(transport),
             [=](Transaction* pointer) {
-               *keepalive &= running_ && keep_alive(*pointer);
+               *keepalive &= keep_alive(*pointer);
                if (*keepalive) {
-                  io_.post([=]() {
+                  get_io_service().post([=]() {
                         prepare_transaction(transport);
                      });
                }
