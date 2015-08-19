@@ -17,14 +17,12 @@ limitations under the License.
 #define CHUNKY_HPP
 
 #include <algorithm>
-#include <atomic>
 #include <deque>
 #include <list>
 #include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 #include <boost/algorithm/string/predicate.hpp>
@@ -1122,11 +1120,14 @@ namespace chunky {
 
       // Set the handler to invoke on an HTTP URI path.
       virtual void set_handler(const std::string& path, const Handler& handler) {
-         std::lock_guard<std::mutex> lock(mutex_);
-         if (handler)
-            handlers_[path] = handler;
+         if (strand_.running_in_this_thread()) {
+            if (handler)
+               handlers_[path] = handler;
+            else
+               handlers_.erase(path);
+         }
          else
-            handlers_.erase(path);
+            strand_.post([=]() { set_handler(path, handler); });
       }
       
       typedef std::function<void(const std::string&)> LogCallback;
@@ -1190,15 +1191,14 @@ namespace chunky {
       virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) = 0;
 
       virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
-         typename decltype(handlers_)::const_iterator i;
-         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            i = handlers_.find(transaction->request_path());
+         if (strand_.running_in_this_thread()) {
+            auto i = handlers_.find(transaction->request_path());
             if (i == handlers_.end())
                i = handlers_.find(std::string());
+            i->second(transaction);
          }
-
-         i->second(transaction);
+         else
+            strand_.post([=]() { dispatch_transaction(transaction); });
       }
       
       virtual void default_handler(const std::shared_ptr<Transaction>& http) {
@@ -1245,7 +1245,6 @@ namespace chunky {
       }
 
    private:
-      std::mutex mutex_;
       boost::asio::io_service& io_;
       boost::asio::io_service::strand strand_;
       std::list<boost::asio::ip::tcp::acceptor> acceptors_;
