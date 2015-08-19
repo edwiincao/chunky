@@ -19,6 +19,7 @@ limitations under the License.
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <list>
 #include <memory>
 #include <regex>
 #include <sstream>
@@ -1088,72 +1089,46 @@ namespace chunky {
    typedef HTTPTransaction<TLS> HTTPS;
 #endif
 
-   template<typename T>
-   class BaseHTTPServer : boost::noncopyable {
+   template<typename Derived, typename T>
+   class BaseHTTPServer : public std::enable_shared_from_this<BaseHTTPServer<Derived, T> > {
    public:
       typedef boost::system::error_code error_code;
       typedef HTTPTransaction<T> Transaction;
       typedef std::function<void(const std::shared_ptr<Transaction>&)> Handler;
 
-      BaseHTTPServer(const Handler& defaultHandler = Handler())
-         : running_(false)
-         , strand_(io_) {
-         using namespace std::placeholders;
-         if (defaultHandler)
-            handlers_[""] = defaultHandler;
-         else
-            handlers_[""] = [this](const std::shared_ptr<Transaction>& http) {
-               default_handler(http);
-            };
+      // Create and start a new server.
+      template<typename... Args>
+      static std::shared_ptr<Derived> create(Args&&... args) {
+         return std::shared_ptr<Derived>(
+            new Derived(std::forward<Args>(args)...),
+            [](Derived* ptr) {
+               delete ptr;
+            });
       }
 
-      virtual ~BaseHTTPServer() {
-         stop();
+      // Stop accepting new connections. References to the server will
+      // be dropped when all existing connections close.
+      void destroy() {
+         for (auto& acceptor : acceptors_)
+            strand_.dispatch([&]() { acceptor.cancel(); });
       }
-
-      virtual boost::asio::io_service& get_io_service() { return io_; }
       
       // Add a local address/port to bind and listen.
       virtual unsigned short listen(const boost::asio::ip::tcp::acceptor::endpoint_type& endpoint) {
          acceptors_.emplace_back(io_, endpoint);
+         accept(acceptors_.back());
          return acceptors_.back().local_endpoint().port();
       }
 
-      virtual void add_handler(const std::string& path, const Handler& handler) {
+      // Set the handler to invoke on an HTTP URI path.
+      virtual void set_handler(const std::string& path, const Handler& handler) {
+         std::lock_guard<std::mutex> lock(mutex_);
          if (handler)
             handlers_[path] = handler;
          else
             handlers_.erase(path);
       }
       
-      // Run the server using worker threads.
-      virtual void run(size_t nThreads = std::thread::hardware_concurrency()) {
-         if (running_)
-            throw std::runtime_error("server already running");
-         running_ = true;
-
-         for (auto& acceptor : acceptors_)
-            strand_.dispatch([&]() { accept(acceptor); });
-         
-         for (size_t i = 0; i < nThreads; ++i) {
-            threads_.emplace_back([this]() {
-                  io_.run();
-               });
-         }
-      }
-
-      // Stop the server, blocking until in-progress connections end.
-      virtual void stop() {
-         running_ = false;
-         for (auto& acceptor : acceptors_)
-            strand_.dispatch([&]() { acceptor.cancel(); });
-         for (auto& thread : threads_)
-            thread.join();
-
-         acceptors_.clear();
-         threads_.clear();
-      }
-
       typedef std::function<void(const std::string&)> LogCallback;
       virtual void set_logger(const LogCallback& logCallback) {
          logCallback_ = logCallback;
@@ -1171,11 +1146,24 @@ namespace chunky {
    protected:
       typedef T Transport;
       
+      BaseHTTPServer(boost::asio::io_service& io)
+         : io_(io)
+         , strand_(io_) {
+         set_handler("", [this](const std::shared_ptr<Transaction>& http) {
+               default_handler(http);
+            });
+      }
+
+      virtual ~BaseHTTPServer() {
+      }
+
+      virtual boost::asio::io_service& get_io_service() { return io_; }
+      
       virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
-         assert(strand_.running_in_this_thread());
+         auto this_ = this->shared_from_this();
          connect_transport(
             acceptor,
-            [&](const error_code& error, const std::shared_ptr<Transport>& transport) {
+            [=, &acceptor](const error_code& error, const std::shared_ptr<Transport>& transport) {
                if (!error) {
                   log((boost::format("connect %s:%d")
                        % transport->stream().lowest_layer().remote_endpoint().address().to_string()
@@ -1186,12 +1174,12 @@ namespace chunky {
                   log(error);
 
                   // Stop accepting on system errors to avoid runaway.
-                  if (error.category() == boost::asio::error::get_system_category())
+                  if (error == make_error_code(boost::asio::error::operation_aborted) ||
+                      error.category() == boost::asio::error::get_system_category())
                      return;
                }
 
-               if (running_)
-                  strand_.dispatch([&]() { accept(acceptor); });
+               strand_.dispatch([=, &acceptor]() { this_->accept(acceptor); });
             });
       }
 
@@ -1202,11 +1190,15 @@ namespace chunky {
       virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) = 0;
 
       virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
-         auto i = handlers_.find(transaction->request_path());
-         if (i != handlers_.end())
-            i->second(transaction);
-         else
-            handlers_.at(std::string())(transaction);
+         typename decltype(handlers_)::const_iterator i;
+         {
+            std::lock_guard<std::mutex> lock(mutex_);
+            i = handlers_.find(transaction->request_path());
+            if (i == handlers_.end())
+               i = handlers_.find(std::string());
+         }
+
+         i->second(transaction);
       }
       
       virtual void default_handler(const std::shared_ptr<Transaction>& http) {
@@ -1249,27 +1241,27 @@ namespace chunky {
              responseConnection->second == close)
             return false;
 
-         return running_;
+         return true;
       }
 
    private:
-      std::atomic<bool> running_;
-      boost::asio::io_service io_;
+      std::mutex mutex_;
+      boost::asio::io_service& io_;
       boost::asio::io_service::strand strand_;
-      std::vector<boost::asio::ip::tcp::acceptor> acceptors_;
-      std::vector<std::thread> threads_;
+      std::list<boost::asio::ip::tcp::acceptor> acceptors_;
       
       std::map<std::string, Handler> handlers_;
       LogCallback logCallback_;
    };
 
-   class SimpleHTTPServer : public BaseHTTPServer<TCP> {
-   public:
-      SimpleHTTPServer(const Handler& defaultHandler = Handler())
-         : BaseHTTPServer(defaultHandler) {
-      }
-
+   class SimpleHTTPServer : public BaseHTTPServer<SimpleHTTPServer, TCP> {
    private:
+      friend class BaseHTTPServer<SimpleHTTPServer, TCP>;
+      
+      SimpleHTTPServer(boost::asio::io_service& io)
+         : BaseHTTPServer<SimpleHTTPServer, TCP>(io) {
+      }
+      
       virtual void connect_transport(
          boost::asio::ip::tcp::acceptor& acceptor,
          const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) {
@@ -1277,6 +1269,8 @@ namespace chunky {
       }
 
       virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
+         auto this_ = shared_from_this();
+         
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
          auto keepalive = std::make_shared<bool>(true);
@@ -1286,6 +1280,7 @@ namespace chunky {
                *keepalive &= keep_alive(*pointer);
                if (*keepalive) {
                   get_io_service().post([=]() {
+                        this_.get();
                         prepare_transaction(transport);
                      });
                }
@@ -1310,14 +1305,15 @@ namespace chunky {
    };
 
 #ifdef BOOST_ASIO_SSL_HPP
-   class SimpleHTTPSServer : public BaseHTTPServer<TLS> {
-   public:
-      SimpleHTTPSServer(boost::asio::ssl::context& context, const Handler& defaultHandler = Handler())
-         : BaseHTTPServer(defaultHandler)
+   class SimpleHTTPSServer : public BaseHTTPServer<SimpleHTTPSServer, TLS> {
+   private:
+      friend class BaseHTTPServer<SimpleHTTPSServer, TLS>;
+      
+      SimpleHTTPSServer(boost::asio::io_service& io, boost::asio::ssl::context& context)
+         : BaseHTTPServer<SimpleHTTPSServer, TLS>(io)
          , context_(context) {
       }
 
-   private:
       boost::asio::ssl::context& context_;
       
       virtual void connect_transport(
@@ -1327,6 +1323,8 @@ namespace chunky {
       }
 
       virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
+         auto this_ = shared_from_this();
+
          // Use the shared_ptr custom deleter to determine when to
          // instantiate the next request on the same connection.
          auto keepalive = std::make_shared<bool>(true);
@@ -1336,6 +1334,7 @@ namespace chunky {
                *keepalive &= keep_alive(*pointer);
                if (*keepalive) {
                   get_io_service().post([=]() {
+                        this_.get();
                         prepare_transaction(transport);
                      });
                }

@@ -343,10 +343,11 @@ int main() {
    // stream for WebSocket data transfer. Using chunky is not actually
    // required as this WebSocket data transfer implementation can
    // wrap any boost::asio stream.
-   chunky::SimpleHTTPServer server;
+   boost::asio::io_service io;
+   auto server = chunky::SimpleHTTPServer::create(io);
 
-   // Simple web page that opens a WebSocket on the server.
-   server.add_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
+   // Simple web page that opens a WebSocket on the server->
+   server->set_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
          // The client will simply echo messages the server sends.
          static const std::string html =
             "<!DOCTYPE html>"
@@ -383,7 +384,7 @@ int main() {
       });
 
    // Perform the WebSocket handshake on /ws.
-   server.add_handler("/ws", [](const std::shared_ptr<chunky::HTTP>& http) {
+   server->set_handler("/ws", [](const std::shared_ptr<chunky::HTTP>& http) {
          BOOST_LOG_TRIVIAL(info) << boost::format("%s %s")
             % http->request_method()
             % http->request_resource();
@@ -420,22 +421,27 @@ int main() {
       });
    
    // Set the optional logging callback.
-   server.set_logger([](const std::string& message) {
+   server->set_logger([](const std::string& message) {
          BOOST_LOG_TRIVIAL(info) << message;
       });
 
    // Run the server on all IPv4 and IPv6 interfaces.
    using boost::asio::ip::tcp;
-   try { server.listen(tcp::endpoint(tcp::v4(), 8800)); } catch (...) {}
-   try { server.listen(tcp::endpoint(tcp::v6(), 8800)); } catch (...) {}
-   server.run();
-   BOOST_LOG_TRIVIAL(info) << "listening on port 8800";
+   try { server->listen(tcp::endpoint(tcp::v4(), 8800)); } catch (...) {}
+   try { server->listen(tcp::endpoint(tcp::v6(), 8800)); } catch (...) {}
    
    // Accept new connections for 60 seconds. After that, the server
    // destructor will block until all existing TCP connections are
    // completed. Note that browsers may leave a connection open for
    // several minutes.
-   std::this_thread::sleep_for(std::chrono::seconds(60));
-   BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+   boost::asio::deadline_timer timer(io, boost::posix_time::seconds(60));
+   timer.async_wait([=](const boost::system::error_code&) mutable {
+         BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+         server->destroy();
+      });
+   
+   BOOST_LOG_TRIVIAL(info) << "listening on port 8800";
+   io.run();
+   
    return 0;
 }

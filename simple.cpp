@@ -20,9 +20,10 @@ limitations under the License.
 
 int main() {
    // Construct a simple HTTP server with sample handlers.
-   chunky::SimpleHTTPServer server;
+   boost::asio::io_service io;
+   auto server = chunky::SimpleHTTPServer::create(io);
 
-   server.add_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
+   server->set_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
@@ -52,7 +53,7 @@ int main() {
          }
       });
    
-   server.add_handler("/async", [](const std::shared_ptr<chunky::HTTP>& http) {
+   server->set_handler("/async", [](const std::shared_ptr<chunky::HTTP>& http) {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
@@ -86,7 +87,7 @@ int main() {
             });
       });
    
-   server.add_handler("/query", [](const std::shared_ptr<chunky::HTTP>& http) {
+   server->set_handler("/query", [](const std::shared_ptr<chunky::HTTP>& http) {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
@@ -114,7 +115,7 @@ int main() {
          }
       });
    
-   server.add_handler("/post", [](const std::shared_ptr<chunky::HTTP>& http) {
+   server->set_handler("/post", [](const std::shared_ptr<chunky::HTTP>& http) {
          // Demonstrate returning 100 Continue status. This is really
          // only useful if the client sends a 'Expect: 100-continue'
          // header but conformant clients should accept it in all
@@ -179,23 +180,27 @@ int main() {
       });
    
    // Set the optional logging callback.
-   server.set_logger([](const std::string& message) {
+   server->set_logger([](const std::string& message) {
          BOOST_LOG_TRIVIAL(info) << message;
       });
 
    // Run the server on all IPv4 and IPv6 interfaces.
    using boost::asio::ip::tcp;
-   try { server.listen(tcp::endpoint(tcp::v4(), 8800)); } catch (...) {}
-   try { server.listen(tcp::endpoint(tcp::v6(), 8800)); } catch (...) {}
-   
-   server.run();
-   BOOST_LOG_TRIVIAL(info) << "listening on port 8800";
+   try { server->listen(tcp::endpoint(tcp::v4(), 8800)); } catch (...) {}
+   try { server->listen(tcp::endpoint(tcp::v6(), 8800)); } catch (...) {}
    
    // Accept new connections for 60 seconds. After that, the server
    // destructor will block until all existing TCP connections are
    // completed. Note that browsers may leave a connection open for
    // several minutes.
-   std::this_thread::sleep_for(std::chrono::seconds(60));
-   BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+   boost::asio::deadline_timer timer(io, boost::posix_time::seconds(60));
+   timer.async_wait([=](const boost::system::error_code&) mutable {
+         BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+         server->destroy();
+      });
+   
+   BOOST_LOG_TRIVIAL(info) << "listening on port 8800";
+   io.run();
+   
    return 0;
 }

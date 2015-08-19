@@ -32,9 +32,10 @@ Here is a minimal program that creates an HTTP server on port 8800:
     #include "chunky.hpp"
 
     int main() {
-       chunky::SimpleHTTPServer server;
+       boost::asio::io_service io;
+       auto server = chunky::SimpleHTTPServer::create(io);
 
-       server.add_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
+       server->set_handler("/", [](const std::shared_ptr<chunky::HTTP>& http) {
              http->response_status() = 200;
              http->response_header("Content-Type") = "text/html";
              boost::asio::write(*http, boost::asio::buffer(std::string("Hello, World!")));
@@ -42,10 +43,9 @@ Here is a minimal program that creates an HTTP server on port 8800:
           });
 
        using boost::asio::ip::tcp;
-       server.listen(tcp::endpoint(tcp::v4(), 8800));
-       server.run();
+       server->listen(tcp::endpoint(tcp::v4(), 8800));
 
-       std::this_thread::sleep_for(std::chrono::seconds(60));
+       io.run();
        return 0;
     }
 

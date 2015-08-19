@@ -28,8 +28,9 @@ int main() {
    context.use_private_key_file("server.pem", boost::asio::ssl::context::pem);
 
    // Create the server and add a sample handler.
-   chunky::SimpleHTTPSServer server(context);
-   server.add_handler("/", [](const std::shared_ptr<chunky::HTTPS>& http) {
+   boost::asio::io_service io;
+   auto server = chunky::SimpleHTTPSServer::create(io, context);
+   server->set_handler("/", [](const std::shared_ptr<chunky::HTTPS>& http) {
          http->response_status() = 200;
          http->response_headers()["Content-Type"] = "text/html";
 
@@ -54,22 +55,27 @@ int main() {
       });
          
    // Set the optional logging callback.
-   server.set_logger([](const std::string& message) {
+   server->set_logger([](const std::string& message) {
          BOOST_LOG_TRIVIAL(info) << message;
       });
 
    // Run the server on all IPv4 and IPv6 interfaces.
    using boost::asio::ip::tcp;
-   try { server.listen(tcp::endpoint(tcp::v4(), 8443)); } catch (...) {}
-   try { server.listen(tcp::endpoint(tcp::v6(), 8443)); } catch (...) {}
-   server.run();
-   BOOST_LOG_TRIVIAL(info) << "listening on port 8443";
+   try { server->listen(tcp::endpoint(tcp::v4(), 8443)); } catch (...) {}
+   try { server->listen(tcp::endpoint(tcp::v6(), 8443)); } catch (...) {}
    
    // Accept new connections for 60 seconds. After that, the server
    // destructor will block until all existing TCP connections are
    // completed. Note that browsers may leave a connection open for
    // several minutes.
-   std::this_thread::sleep_for(std::chrono::seconds(60));
-   BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+   boost::asio::deadline_timer timer(io, boost::posix_time::seconds(60));
+   timer.async_wait([=](const boost::system::error_code&) mutable {
+         BOOST_LOG_TRIVIAL(info) << "exiting (blocks until existing connections close)";
+         server->destroy();
+      });
+   
+   BOOST_LOG_TRIVIAL(info) << "listening on port 8443";
+   io.run();
+   
    return 0;
 }

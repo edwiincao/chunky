@@ -19,21 +19,34 @@ using boost::system::error_code;
 
 #define LOG(LEVEL) BOOST_LOG_TRIVIAL(LEVEL)
 
-class TestServer : public chunky::SimpleHTTPServer {
+class TestServer {
+   boost::asio::io_service io_;
+   std::shared_ptr<chunky::SimpleHTTPServer> server_;
    unsigned short port_;
+
+   std::thread thread_;
+
 public:
-   TestServer(const chunky::SimpleHTTPServer::Handler& callback)
-      : chunky::SimpleHTTPServer(callback) {
+   TestServer(const chunky::SimpleHTTPServer::Handler& callback) {
+      server_ = chunky::SimpleHTTPServer::create(io_);
+      server_->set_handler("", callback);
+
       // Bind to the first resolution of "localhost" and an unused port.
-      boost::asio::ip::tcp::resolver resolver(get_io_service());
+      boost::asio::ip::tcp::resolver resolver(io_);
       boost::asio::ip::tcp::resolver::query query("localhost", "");
       auto endpoints = resolver.resolve(query);
-      port_ = listen(*endpoints);
+      port_ = server_->listen(*endpoints);
 
-      // Run on a single thread for better repeatibility.
-      run(1);
+      std::thread([this]() {
+            io_.run();
+         }).swap(thread_);
    }
 
+   ~TestServer() {
+      server_->destroy();
+      thread_.join();
+   }
+   
    unsigned short port() const { return port_; }
    
    void log(const std::string& message) {
