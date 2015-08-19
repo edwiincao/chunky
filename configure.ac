@@ -28,6 +28,7 @@ AM_CONDITIONAL([NEEDS_PTHREAD], [echo $host_os | grep -q "linux"])
 # Boost Asio SSL classes, plus the websocket sample also uses OpenSSL.
 # libcurl is needed for the unit test.
 BOOST_REQUIRE([1.54], [AC_MSG_ERROR([missing or obsolete Boost])])
+BOOST_DATE_TIME
 BOOST_LOG
 BOOST_SYSTEM
 BOOST_TEST
