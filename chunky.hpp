@@ -1097,11 +1097,7 @@ namespace chunky {
       // Create and start a new server.
       template<typename... Args>
       static std::shared_ptr<Derived> create(Args&&... args) {
-         return std::shared_ptr<Derived>(
-            new Derived(std::forward<Args>(args)...),
-            [](Derived* ptr) {
-               delete ptr;
-            });
+         return std::shared_ptr<Derived>(new Derived(std::forward<Args>(args)...));
       }
 
       // Stop accepting new connections. References to the server will
@@ -1160,7 +1156,48 @@ namespace chunky {
 
       virtual boost::asio::io_service& get_io_service() { return io_; }
       
-      virtual void accept(boost::asio::ip::tcp::acceptor& acceptor) {
+      virtual void connect_transport(
+         boost::asio::ip::tcp::acceptor& acceptor,
+         const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) = 0;
+
+      virtual void disconnect_transport(
+         const std::shared_ptr<Transport>&,
+         boost::system::error_code&) {
+      }
+      
+      virtual void default_handler(const std::shared_ptr<Transaction>& http) {
+         http->response_status() = 404;
+         http->response_header("Content-Type") = "text/html";
+         
+         static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
+         boost::asio::async_write(
+            *http, boost::asio::buffer(NotFound),
+            [=](const boost::system::error_code& error, size_t) {
+               if (error) {
+                  log(error);
+                  return;
+               }
+
+               http->async_finish([=](const boost::system::error_code& error) {
+                     if (error) {
+                        log(error);
+                        return;
+                     }
+
+                     http.get();
+                  });
+            });
+      }
+
+   private:
+      boost::asio::io_service& io_;
+      boost::asio::io_service::strand strand_;
+      std::list<boost::asio::ip::tcp::acceptor> acceptors_;
+      
+      std::map<std::string, Handler> handlers_;
+      LogCallback logCallback_;
+
+      void accept(boost::asio::ip::tcp::acceptor& acceptor) {
          auto this_ = this->shared_from_this();
          connect_transport(
             acceptor,
@@ -1184,16 +1221,7 @@ namespace chunky {
             });
       }
 
-      virtual void connect_transport(
-         boost::asio::ip::tcp::acceptor& acceptor,
-         const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) = 0;
-
-      virtual void disconnect_transport(
-         const std::shared_ptr<Transport>&,
-         boost::system::error_code&) {
-      }
-      
-      virtual void create_transaction(const std::shared_ptr<Transport>& transport) {
+      void create_transaction(const std::shared_ptr<Transport>& transport) {
          auto this_ = this->shared_from_this();
          auto keepalive = std::make_shared<bool>(true);
          std::shared_ptr<Transaction> http(
@@ -1226,38 +1254,14 @@ namespace chunky {
             });
       }
       
-      virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
+      void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
          auto i = handlers_.find(transaction->request_path());
          if (i == handlers_.end())
             i = handlers_.find(std::string());
          i->second(transaction);
       }
       
-      virtual void default_handler(const std::shared_ptr<Transaction>& http) {
-         http->response_status() = 404;
-         http->response_header("Content-Type") = "text/html";
-         
-         static std::string NotFound("<title>404 - Not Found</title><h1>404 - Not Found</h1>");
-         boost::asio::async_write(
-            *http, boost::asio::buffer(NotFound),
-            [=](const boost::system::error_code& error, size_t) {
-               if (error) {
-                  log(error);
-                  return;
-               }
-
-               http->async_finish([=](const boost::system::error_code& error) {
-                     if (error) {
-                        log(error);
-                        return;
-                     }
-
-                     http.get();
-                  });
-            });
-      }
-
-      virtual bool keep_alive(Transaction& http) {
+      bool keep_alive(Transaction& http) {
          if (http.response_status() == 101)
             return false;
          
@@ -1275,14 +1279,6 @@ namespace chunky {
 
          return true;
       }
-
-   private:
-      boost::asio::io_service& io_;
-      boost::asio::io_service::strand strand_;
-      std::list<boost::asio::ip::tcp::acceptor> acceptors_;
-      
-      std::map<std::string, Handler> handlers_;
-      LogCallback logCallback_;
    };
 
    class SimpleHTTPServer : public BaseHTTPServer<SimpleHTTPServer, TCP> {
