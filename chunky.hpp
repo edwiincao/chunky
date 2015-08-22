@@ -1120,14 +1120,14 @@ namespace chunky {
 
       // Set the handler to invoke on an HTTP URI path.
       virtual void set_handler(const std::string& path, const Handler& handler) {
-         if (strand_.running_in_this_thread()) {
-            if (handler)
-               handlers_[path] = handler;
-            else
-               handlers_.erase(path);
-         }
-         else
-            strand_.post([=]() { set_handler(path, handler); });
+         auto this_ = this->shared_from_this();
+         strand_.dispatch([=]() {
+               this_.get();
+               if (handler)
+                  handlers_[path] = handler;
+               else
+                  handlers_.erase(path);
+            });
       }
       
       typedef std::function<void(const std::string&)> LogCallback;
@@ -1150,9 +1150,9 @@ namespace chunky {
       BaseHTTPServer(boost::asio::io_service& io)
          : io_(io)
          , strand_(io_) {
-         set_handler("", [this](const std::shared_ptr<Transaction>& http) {
-               default_handler(http);
-            });
+         handlers_[std::string()] = [this](const std::shared_ptr<Transaction>& http) {
+            default_handler(http);
+         };
       }
 
       virtual ~BaseHTTPServer() {
@@ -1169,7 +1169,7 @@ namespace chunky {
                   log((boost::format("connect %s:%d")
                        % transport->stream().lowest_layer().remote_endpoint().address().to_string()
                        % transport->stream().lowest_layer().remote_endpoint().port()).str());
-                  prepare_transaction(transport);
+                  create_transaction(transport);
                }
                else {
                   log(error);
@@ -1187,18 +1187,50 @@ namespace chunky {
       virtual void connect_transport(
          boost::asio::ip::tcp::acceptor& acceptor,
          const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) = 0;
-      
-      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) = 0;
 
+      virtual void disconnect_transport(
+         const std::shared_ptr<Transport>&,
+         boost::system::error_code&) {
+      }
+      
+      virtual void create_transaction(const std::shared_ptr<Transport>& transport) {
+         auto this_ = this->shared_from_this();
+         auto keepalive = std::make_shared<bool>(true);
+         std::shared_ptr<Transaction> http(
+            new Transaction(transport),
+            [=](Transaction* pointer) {
+               *keepalive &= keep_alive(*pointer);
+               if (*keepalive) {
+                  get_io_service().post([=]() {
+                        this_.get();
+                        create_transaction(transport);
+                     });
+               }
+
+               delete pointer;
+            });
+
+         // For convenience, issue a null read so that request
+         // metadata is already valid for the callback.
+         http->async_read_some(
+            boost::asio::null_buffers(),
+            [=](boost::system::error_code error, size_t) {
+               if (error) {
+                  disconnect_transport(http->stream(), error);
+                  log(error);
+                  *keepalive = false;
+                  return;
+               }
+
+               strand_.dispatch([=]() { dispatch_transaction(http); });
+            });
+      }
+      
       virtual void dispatch_transaction(const std::shared_ptr<Transaction>& transaction) {
-         if (strand_.running_in_this_thread()) {
-            auto i = handlers_.find(transaction->request_path());
-            if (i == handlers_.end())
-               i = handlers_.find(std::string());
-            i->second(transaction);
-         }
-         else
-            strand_.post([=]() { dispatch_transaction(transaction); });
+         auto i = handlers_.find(transaction->request_path());
+         if (i == handlers_.end())
+            i = handlers_.find(std::string());
+         i->second(transaction);
       }
       
       virtual void default_handler(const std::shared_ptr<Transaction>& http) {
@@ -1266,41 +1298,6 @@ namespace chunky {
          const std::function<void(const error_code&, const std::shared_ptr<Transport>&)>& handler) {
          Transport::async_connect(acceptor, handler);
       }
-
-      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
-         auto this_ = shared_from_this();
-         
-         // Use the shared_ptr custom deleter to determine when to
-         // instantiate the next request on the same connection.
-         auto keepalive = std::make_shared<bool>(true);
-         std::shared_ptr<Transaction> http(
-            new Transaction(transport),
-            [=](Transaction* pointer) {
-               *keepalive &= keep_alive(*pointer);
-               if (*keepalive) {
-                  get_io_service().post([=]() {
-                        this_.get();
-                        prepare_transaction(transport);
-                     });
-               }
-
-               delete pointer;
-            });
-
-         // For convenience, issue a null read so that request
-         // metadata is already valid for the callback.
-         http->async_read_some(
-            boost::asio::null_buffers(),
-            [=](const boost::system::error_code& error, size_t) {
-               if (error) {
-                  log(error);
-                  *keepalive = false;
-                  return;
-               }
-
-               dispatch_transaction(http);
-            });
-      }
    };
 
 #ifdef BOOST_ASIO_SSL_HPP
@@ -1321,53 +1318,21 @@ namespace chunky {
          Transport::async_connect(acceptor, context_, handler);
       }
 
-      virtual void prepare_transaction(const std::shared_ptr<Transport>& transport) {
-         auto this_ = shared_from_this();
-
-         // Use the shared_ptr custom deleter to determine when to
-         // instantiate the next request on the same connection.
-         auto keepalive = std::make_shared<bool>(true);
-         std::shared_ptr<Transaction> http(
-            new Transaction(transport),
-            [=](Transaction* pointer) {
-               *keepalive &= keep_alive(*pointer);
-               if (*keepalive) {
-                  get_io_service().post([=]() {
-                        this_.get();
-                        prepare_transaction(transport);
-                     });
-               }
-
-               delete pointer;
-            });
-
-         // For convenience, issue a null read so that request
-         // metadata is already valid for the callback.
-         http->async_read_some(
-            boost::asio::null_buffers(),
-            [=](boost::system::error_code error, size_t) {
-               if (error) {
-                  // Cleanly terminate TLS if necessary.
-                  if (error.category() == boost::asio::error::get_ssl_category()) {
-                     std::shared_ptr<TLS> tls = http->stream();
-                     tls->stream().async_shutdown([=](const error_code&) {
-                           tls.get();
-                        });
-                  }
+      virtual void disconnect_transport(
+         const std::shared_ptr<Transport>& transport,
+         boost::system::error_code& error) {
+         // Cleanly terminate TLS if necessary.
+         if (error.category() == boost::asio::error::get_ssl_category()) {
+            transport->stream().async_shutdown([=](const error_code&) {
+                  transport.get();
+               });
+         }
                   
-                  // Convert short read error into EOF for consistency
-                  // with TCP.
-                  if (error.category() == boost::asio::error::get_ssl_category() &&
-                      error.value() == ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ))
-                     error = make_error_code(boost::asio::error::eof);
-
-                  log(error);
-                  *keepalive = false;
-                  return;
-               }
-
-               dispatch_transaction(http);
-            });
+         // Convert short read error into EOF for consistency
+         // with TCP.
+         if (error.category() == boost::asio::error::get_ssl_category() &&
+             error.value() == ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ))
+            error = make_error_code(boost::asio::error::eof);
       }
    };
 #endif
