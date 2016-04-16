@@ -22,7 +22,7 @@ chunky.
 In addition, the chunky unit tests require linking with
 [Boost Log](http://www.boost.org/doc/libs/1_59_0/libs/log/doc/html/index.html),
 [Boost Test](http://www.boost.org/doc/libs/1_59_0/libs/test/doc/html/index.html),
-and [libcurl](http://curl.haxx.se/libcurl/). All samples require linking
+and [libcurl](http://curl.haxx.se/libcurl/). All samples require
 linking with Boost Date/Time and Boost Log, and the TLS and WebSocket
 samples additionally require [OpenSSL](https://www.openssl.org/).
 
